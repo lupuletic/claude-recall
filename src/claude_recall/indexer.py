@@ -203,13 +203,12 @@ def ensure_index(
         if has_semantic():
             _spawn_background_embeddings(db_path, projects_dir, verbose)
     else:
-        # Quick incremental check — skip if DB is locked (background embeddings running)
+        # Quick incremental check — always defer embeddings (only generate during explicit `index`)
         try:
-            # Use a short timeout so we don't hang
-            conn = get_connection(db_path)
-            conn.execute("PRAGMA busy_timeout=1000")  # 1s max wait
-            conn.close()
-            build_index(projects_dir, db_path, force=False, verbose=False)
+            build_index(
+                projects_dir, db_path, force=False, verbose=False,
+                defer_embeddings=True,
+            )
         except Exception:
             pass  # DB locked by background embeddings — search with existing index
 

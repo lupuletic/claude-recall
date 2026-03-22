@@ -9,8 +9,9 @@ import sys
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Input, Label, ListItem, ListView, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static
 
 from claude_recall.models import SearchResult
 from claude_recall.utils import clean_display_text, format_date, format_size
@@ -121,6 +122,193 @@ class PreviewPanel(Static):
         self.update("\n".join(lines))
 
 
+class SettingsScreen(ModalScreen):
+    """Settings modal overlay."""
+
+    CSS = """
+    SettingsScreen {
+        align: center middle;
+    }
+    #settings-dialog {
+        width: 65;
+        height: auto;
+        max-height: 85%;
+        border: tall $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #settings-title {
+        text-align: center;
+        text-style: bold;
+        padding: 0 0 1 0;
+        color: $text-primary;
+    }
+    .setting-row {
+        height: 3;
+        padding: 0 0 0 0;
+    }
+    .setting-key {
+        width: 22;
+        text-style: bold;
+        padding: 1 1 0 0;
+    }
+    .setting-value {
+        width: 1fr;
+    }
+    .setting-value Input {
+        width: 100%;
+    }
+    #settings-buttons {
+        height: 3;
+        align: center middle;
+        padding: 1 0 0 0;
+    }
+    #settings-buttons Button {
+        margin: 0 1;
+    }
+    .mode-option {
+        height: 1;
+        padding: 0 0 0 2;
+    }
+    .mode-option.selected {
+        color: $success;
+        text-style: bold;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+    ]
+
+    def compose(self) -> ComposeResult:
+        from claude_recall.config import SEARCH_MODES, load_config
+
+        self._config = load_config()
+
+        with VerticalScroll(id="settings-dialog"):
+            yield Static("Settings", id="settings-title")
+
+            # Search mode as a selectable list
+            yield Static("[bold]Search Mode[/bold]", markup=True)
+            for mode, desc in SEARCH_MODES.items():
+                selected = mode == self._config["search_mode"]
+                prefix = "[green bold]>[/green bold]" if selected else " "
+                yield Static(
+                    f"  {prefix} [bold]{mode}[/bold] — [dim]{desc}[/dim]",
+                    markup=True,
+                    classes=f"mode-option {'selected' if selected else ''}",
+                    id=f"mode-{mode}",
+                )
+
+            yield Static("")
+
+            # Inputs
+            with Horizontal(classes="setting-row"):
+                yield Static("Results Limit", classes="setting-key")
+                yield Input(
+                    value=str(self._config["limit"]),
+                    type="integer",
+                    id="limit-input",
+                    classes="setting-value",
+                )
+
+            with Horizontal(classes="setting-row"):
+                yield Static("Relevance Cutoff", classes="setting-key")
+                yield Input(
+                    value=str(self._config["relevance_cutoff"]),
+                    id="cutoff-input",
+                    classes="setting-value",
+                )
+
+            yield Static("")
+
+            # Toggles as clickable labels
+            sub = "on" if self._config["show_subagents"] else "off"
+            yield Static(
+                f"  [{'green' if self._config['show_subagents'] else 'dim'}]"
+                f"[{'x' if self._config['show_subagents'] else ' '}][/] "
+                f"Show subagent sessions",
+                markup=True,
+                id="toggle-subagents",
+            )
+            hook = "on" if self._config["auto_index_hook"] else "off"
+            yield Static(
+                f"  [{'green' if self._config['auto_index_hook'] else 'dim'}]"
+                f"[{'x' if self._config['auto_index_hook'] else ' '}][/] "
+                f"Auto-install SessionEnd hook",
+                markup=True,
+                id="toggle-hook",
+            )
+
+            yield Static("")
+
+            with Horizontal(id="settings-buttons"):
+                yield Button("Save", variant="primary", id="save-btn")
+                yield Button("Cancel", variant="default", id="cancel-btn")
+
+    @on(Static.Click)
+    def on_static_click(self, event: Static.Click) -> None:
+        """Handle clicks on mode options and toggles."""
+        widget_id = event.static.id or ""
+
+        if widget_id.startswith("mode-"):
+            mode = widget_id[5:]
+            self._config["search_mode"] = mode
+            # Update visual state
+            from claude_recall.config import SEARCH_MODES
+            for m in SEARCH_MODES:
+                w = self.query_one(f"#mode-{m}", Static)
+                selected = m == mode
+                prefix = "[green bold]>[/green bold]" if selected else " "
+                desc = SEARCH_MODES[m]
+                w.update(
+                    f"  {prefix} [bold]{m}[/bold] — [dim]{desc}[/dim]"
+                )
+
+        elif widget_id == "toggle-subagents":
+            self._config["show_subagents"] = not self._config["show_subagents"]
+            v = self._config["show_subagents"]
+            event.static.update(
+                f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
+                f"Show subagent sessions"
+            )
+
+        elif widget_id == "toggle-hook":
+            self._config["auto_index_hook"] = not self._config["auto_index_hook"]
+            v = self._config["auto_index_hook"]
+            event.static.update(
+                f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
+                f"Auto-install SessionEnd hook"
+            )
+
+    @on(Button.Pressed, "#save-btn")
+    def on_save(self, event: Button.Pressed) -> None:
+        self._save_settings()
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self, event: Button.Pressed) -> None:
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def _save_settings(self) -> None:
+        from claude_recall.config import save_config
+
+        # Read inputs
+        try:
+            self._config["limit"] = int(self.query_one("#limit-input", Input).value)
+        except ValueError:
+            pass
+        try:
+            self._config["relevance_cutoff"] = float(self.query_one("#cutoff-input", Input).value)
+        except ValueError:
+            pass
+
+        save_config(self._config)
+        self.dismiss(True)
+
+
 class RecallApp(App):
     """claude-recall interactive session search."""
 
@@ -172,6 +360,7 @@ class RecallApp(App):
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
         Binding("tab", "toggle_preview", "Preview", show=True),
+        Binding("ctrl+s", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
@@ -316,6 +505,15 @@ class RecallApp(App):
         """Toggle the preview panel."""
         preview = self.query_one("#preview", PreviewPanel)
         preview.toggle_class("visible")
+
+    def action_open_settings(self) -> None:
+        """Open the settings modal."""
+        def on_settings_dismissed(saved: bool) -> None:
+            if saved:
+                status = self.query_one("#status", Label)
+                status.update("Settings saved")
+
+        self.push_screen(SettingsScreen(), on_settings_dismissed)
 
     def action_quit(self) -> None:
         self.exit(None)
