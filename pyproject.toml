@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-recall"
+version = "0.1.0"
+description = "Semantic search across Claude Code sessions. Find past conversations by intent, not just keywords."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Catalin Lupuleti" }]
+keywords = ["claude", "claude-code", "session", "search", "semantic", "recall"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Indexing",
+]
+
+[project.scripts]
+claude-recall = "claude_recall.cli:main"
+
+[project.optional-dependencies]
+semantic = ["fastembed>=0.4", "sqlite-vec>=0.1"]
+tui = ["textual>=1.0"]
+all = ["claude-recall[semantic,tui]"]
+
+[project.urls]
+Homepage = "https://github.com/anthropics/claude-recall"
+Repository = "https://github.com/anthropics/claude-recall"
+Issues = "https://github.com/anthropics/claude-recall/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_recall"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
