@@ -32,6 +32,7 @@ claude-recall = "claude_recall.cli:main"
 semantic = ["fastembed>=0.4", "sqlite-vec>=0.1"]
 tui = ["textual>=1.0"]
 all = ["claude-recall[semantic,tui]"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [project.urls]
 Homepage = "https://github.com/anthropics/claude-recall"

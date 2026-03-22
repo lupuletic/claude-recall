@@ -1,0 +1,454 @@
+"""Tests for claude_recall.searcher."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from claude_recall.db import get_connection, upsert_chunks, upsert_session
+from claude_recall.models import SearchResult, Session
+from claude_recall.searcher import (
+    _cross_encoder_rerank,
+    _fts_search,
+    _prepare_fts_query,
+    _reciprocal_rank_fusion,
+    search,
+)
+
+
+# ===========================================================================
+# _prepare_fts_query
+# ===========================================================================
+
+class TestPrepareFtsQuery:
+    def test_empty_query(self):
+        assert _prepare_fts_query("") == ""
+
+    def test_whitespace_query(self):
+        assert _prepare_fts_query("   ") == ""
+
+    def test_single_keyword(self):
+        result = _prepare_fts_query("authentication")
+        assert result == '"authentication"'
+
+    def test_multiple_keywords_and_join(self):
+        result = _prepare_fts_query("debug middleware")
+        assert '"debug"' in result
+        assert '"middleware"' in result
+        assert " AND " in result
+
+    def test_stop_words_filtered(self):
+        result = _prepare_fts_query("the bug in authentication")
+        # "the" and "in" are stop words
+        assert '"the"' not in result
+        assert '"in"' not in result
+        assert '"bug"' in result
+        assert '"authentication"' in result
+
+    def test_all_stop_words_uses_or_fallback(self):
+        result = _prepare_fts_query("the is it")
+        # All are stop words; should fall back to OR with original words > 1 char
+        assert "OR" in result
+
+    def test_fts5_passthrough_and(self):
+        query = 'auth AND middleware'
+        result = _prepare_fts_query(query)
+        # Should pass through because it contains " AND "
+        assert result == query
+
+    def test_fts5_passthrough_or(self):
+        query = 'auth OR middleware'
+        result = _prepare_fts_query(query)
+        assert result == query
+
+    def test_fts5_passthrough_not(self):
+        query = 'auth NOT test'
+        result = _prepare_fts_query(query)
+        assert result == query
+
+    def test_fts5_passthrough_quotes(self):
+        query = '"exact phrase"'
+        result = _prepare_fts_query(query)
+        assert result == query
+
+    def test_special_chars_escaped_by_quoting(self):
+        """Colons, parens, asterisks should be safe inside quotes."""
+        result = _prepare_fts_query("file:main.py")
+        # Should be quoted to escape the colon
+        assert '"file:main.py"' in result
+
+    def test_short_terms_filtered(self):
+        result = _prepare_fts_query("a b debug")
+        # single-char terms should be filtered
+        assert '"debug"' in result
+
+    def test_single_short_term_passthrough(self):
+        """If all terms are short/stopwords, fall back gracefully."""
+        result = _prepare_fts_query("a")
+        # With only single-char terms, should return original query
+        assert result == "a"
+
+
+# ===========================================================================
+# search (integration via FTS)
+# ===========================================================================
+
+class TestSearch:
+    @pytest.fixture
+    def search_db(self, db_path: Path):
+        """Create a DB with sessions for search testing."""
+        conn = get_connection(db_path)
+
+        sessions = [
+            Session(
+                session_id="s1",
+                project_path="/Users/test/myapp",
+                project_dir="-Users-test-myapp",
+                file_path="/tmp/s1.jsonl",
+                summary="Auth middleware debugging",
+                first_prompt="Debug the auth middleware",
+                first_reply="Looking at it now.",
+                last_prompt="Add error handling",
+                last_reply="Done.",
+                messages_text="Debug the auth middleware token validation error handling",
+                message_count=5,
+                file_size=1024,
+                created="2025-01-15T10:00:00Z",
+                modified="2025-01-15T11:00:00Z",
+                mtime=1736935800.0,
+                is_subagent=False,
+            ),
+            Session(
+                session_id="s2",
+                project_path="/Users/test/webapp",
+                project_dir="-Users-test-webapp",
+                file_path="/tmp/s2.jsonl",
+                summary="React router setup",
+                first_prompt="Set up routing",
+                first_reply="Configuring routes.",
+                last_prompt="Add 404 page",
+                last_reply="Done.",
+                messages_text="Set up routing navigation React router component",
+                message_count=8,
+                file_size=2048,
+                created="2025-02-01T08:00:00Z",
+                modified="2025-02-01T10:00:00Z",
+                mtime=1738396800.0,
+                is_subagent=False,
+            ),
+            Session(
+                session_id="s3_sub",
+                project_path="/Users/test/myapp",
+                project_dir="-Users-test-myapp",
+                file_path="/tmp/s3.jsonl",
+                summary="Linter run",
+                first_prompt="Run linter",
+                first_reply="Done.",
+                messages_text="Run linter check",
+                message_count=1,
+                file_size=256,
+                created="2025-01-15T10:30:00Z",
+                modified="2025-01-15T10:31:00Z",
+                mtime=1736937060.0,
+                is_subagent=True,
+                parent_session="s1",
+            ),
+        ]
+
+        for s in sessions:
+            upsert_session(conn, s)
+
+        upsert_chunks(conn, "s1", ["auth middleware debugging tokens"])
+        upsert_chunks(conn, "s2", ["react router setup navigation"])
+        upsert_chunks(conn, "s3_sub", ["linter check"])
+
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_keyword_search_returns_results(self, search_db):
+        results = search("auth middleware", db_path=search_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "s1"
+
+    def test_empty_query_returns_empty(self, search_db):
+        assert search("", db_path=search_db) == []
+
+    def test_whitespace_query_returns_empty(self, search_db):
+        assert search("   ", db_path=search_db) == []
+
+    def test_nonsense_query_returns_empty(self, search_db):
+        results = search("xyzzyplugh9876543", db_path=search_db, semantic=False)
+        assert results == []
+
+    def test_project_filter(self, search_db):
+        results = search("middleware router", db_path=search_db, semantic=False, project_filter="webapp")
+        for r in results:
+            assert "webapp" in r.session.project_path
+
+    def test_date_after_filter(self, search_db):
+        results = search(
+            "routing",
+            db_path=search_db,
+            semantic=False,
+            after="2025-01-20",
+        )
+        for r in results:
+            assert r.session.modified >= "2025-01-20"
+
+    def test_date_before_filter(self, search_db):
+        results = search(
+            "auth",
+            db_path=search_db,
+            semantic=False,
+            before="2025-01-31",
+        )
+        for r in results:
+            assert r.session.modified <= "2025-01-31"
+
+    def test_min_messages_filter(self, search_db):
+        results = search(
+            "auth middleware routing",
+            db_path=search_db,
+            semantic=False,
+            min_messages=6,
+        )
+        for r in results:
+            assert r.session.message_count >= 6
+
+    def test_subagent_excluded(self, search_db):
+        """Subagent sessions should be excluded from results."""
+        results = search("linter", db_path=search_db, semantic=False)
+        for r in results:
+            assert not r.session.is_subagent
+
+    def test_results_have_scores(self, search_db):
+        results = search("auth middleware", db_path=search_db, semantic=False)
+        for r in results:
+            assert isinstance(r.score, float)
+            assert r.score >= 0
+
+    def test_fts_special_chars_safe(self, search_db):
+        """Special FTS5 characters should not crash the search."""
+        for query in ["file:main.py", "func()", "test*", "a:b:c", "(parens)"]:
+            # Should not raise
+            results = search(query, db_path=search_db, semantic=False)
+            assert isinstance(results, list)
+
+
+# ===========================================================================
+# _fts_search
+# ===========================================================================
+
+class TestFtsSearch:
+    def test_returns_search_results(self, db_path):
+        conn = get_connection(db_path)
+        s = Session(
+            session_id="fts1",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/fts1.jsonl",
+            first_prompt="python decorators",
+            messages_text="python decorators metaclass",
+            message_count=3,
+            is_subagent=False,
+        )
+        upsert_session(conn, s)
+        conn.commit()
+
+        results = _fts_search(conn, '"python decorators"', 10, None, None, None, 1)
+        conn.close()
+
+        assert len(results) >= 1
+        assert results[0].session.session_id == "fts1"
+
+    def test_bm25_ranking(self, db_path):
+        """Sessions with more keyword matches should rank higher."""
+        conn = get_connection(db_path)
+
+        # Session with many keyword occurrences
+        s1 = Session(
+            session_id="bm1",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/bm1.jsonl",
+            summary="python python python",
+            first_prompt="python decorators advanced python",
+            messages_text="python decorators metaclass python pattern python",
+            message_count=5,
+            is_subagent=False,
+        )
+        # Session with fewer occurrences
+        s2 = Session(
+            session_id="bm2",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/bm2.jsonl",
+            first_prompt="javascript basics",
+            messages_text="javascript basics and also python once",
+            message_count=3,
+            is_subagent=False,
+        )
+        upsert_session(conn, s1)
+        upsert_session(conn, s2)
+        conn.commit()
+
+        results = _fts_search(conn, '"python"', 10, None, None, None, 1)
+        conn.close()
+
+        assert len(results) >= 2
+        # s1 should rank higher (more "python" occurrences)
+        ids = [r.session.session_id for r in results]
+        assert ids[0] == "bm1"
+
+
+# ===========================================================================
+# _reciprocal_rank_fusion
+# ===========================================================================
+
+class TestReciprocalRankFusion:
+    def _make_result(self, session_id: str, score: float = 0.0) -> SearchResult:
+        s = Session(
+            session_id=session_id,
+            project_path="/test",
+            project_dir="test",
+            file_path=f"/tmp/{session_id}.jsonl",
+        )
+        return SearchResult(session=s, score=score)
+
+    def test_empty_inputs(self):
+        result = _reciprocal_rank_fusion([], [])
+        assert result == []
+
+    def test_fts_only(self):
+        fts = [self._make_result("a"), self._make_result("b")]
+        result = _reciprocal_rank_fusion(fts, [])
+        assert len(result) == 2
+
+    def test_vec_only(self):
+        vec = [self._make_result("a"), self._make_result("b")]
+        result = _reciprocal_rank_fusion([], vec)
+        assert len(result) == 2
+
+    def test_combines_results(self):
+        fts = [self._make_result("a"), self._make_result("b")]
+        vec = [self._make_result("b"), self._make_result("c")]
+        result = _reciprocal_rank_fusion(fts, vec)
+        ids = {r.session.session_id for r in result}
+        assert ids == {"a", "b", "c"}
+
+    def test_shared_result_scores_higher(self):
+        """A result in both FTS and vec should score higher than one in only one."""
+        fts = [self._make_result("shared"), self._make_result("fts_only")]
+        vec = [self._make_result("shared"), self._make_result("vec_only")]
+        result = _reciprocal_rank_fusion(fts, vec, alpha=0.5)
+
+        # "shared" should be first since it appears in both
+        assert result[0].session.session_id == "shared"
+
+    def test_scores_normalized_to_01(self):
+        fts = [self._make_result("a"), self._make_result("b")]
+        vec = [self._make_result("c")]
+        result = _reciprocal_rank_fusion(fts, vec)
+        scores = [r.score for r in result]
+        assert max(scores) == pytest.approx(1.0)
+        assert min(scores) >= 0.0
+
+    def test_alpha_weighting(self):
+        """Higher alpha should weight FTS more."""
+        fts = [self._make_result("fts_top")]
+        vec = [self._make_result("vec_top")]
+
+        result_fts_heavy = _reciprocal_rank_fusion(fts, vec, alpha=0.9)
+        # With alpha=0.9, fts_top should rank first
+        assert result_fts_heavy[0].session.session_id == "fts_top"
+
+        result_vec_heavy = _reciprocal_rank_fusion(fts, vec, alpha=0.1)
+        # With alpha=0.1, vec_top should rank first
+        assert result_vec_heavy[0].session.session_id == "vec_top"
+
+
+# ===========================================================================
+# _cross_encoder_rerank
+# ===========================================================================
+
+class TestCrossEncoderRerank:
+    def _make_result(self, session_id: str, prompt: str, score: float = 0.5) -> SearchResult:
+        s = Session(
+            session_id=session_id,
+            project_path="/test",
+            project_dir="test",
+            file_path=f"/tmp/{session_id}.jsonl",
+            first_prompt=prompt,
+        )
+        return SearchResult(session=s, score=score)
+
+    def test_empty_results(self):
+        assert _cross_encoder_rerank("query", []) == []
+
+    def test_single_result_unchanged(self):
+        r = self._make_result("a", "hello")
+        result = _cross_encoder_rerank("hello", [r])
+        assert len(result) == 1
+
+    @patch("claude_recall.embedder.get_reranker")
+    def test_reranker_reorders(self, mock_get_reranker):
+        """Mock reranker should reorder results."""
+        mock_reranker = MagicMock()
+        # Return items in reversed order with scores
+        mock_reranker.rerank.return_value = [
+            (1, 0.95),  # second result is now first
+            (0, 0.30),  # first result is now second
+        ]
+        mock_get_reranker.return_value = mock_reranker
+
+        r0 = self._make_result("a", "auth debugging")
+        r1 = self._make_result("b", "middleware fix")
+        result = _cross_encoder_rerank("middleware", [r0, r1])
+
+        assert len(result) >= 1
+        assert result[0].session.session_id == "b"
+
+    @patch("claude_recall.embedder.get_reranker")
+    def test_relevance_cutoff(self, mock_get_reranker):
+        """Low-scoring results should be dropped if top score is strong."""
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = [
+            (0, 0.9),   # strong match
+            (1, 0.1),   # very weak match — below 40% of top
+        ]
+        mock_get_reranker.return_value = mock_reranker
+
+        r0 = self._make_result("strong", "auth debug")
+        r1 = self._make_result("weak", "unrelated")
+        result = _cross_encoder_rerank("auth", [r0, r1])
+
+        # The weak result should be dropped (0.1 is less than 0.4 * 0.9 normalized)
+        # After normalization: strong=1.0, weak=0.0; cutoff = 1.0 * 0.4 = 0.4
+        # weak (0.0) < 0.4 so it should be dropped
+        ids = [r.session.session_id for r in result]
+        assert "strong" in ids
+        assert "weak" not in ids
+
+    @patch("claude_recall.embedder.get_reranker", return_value=None)
+    def test_no_reranker_returns_unchanged(self, mock_get_reranker):
+        """If reranker is not available, return results unchanged."""
+        r0 = self._make_result("a", "hello")
+        r1 = self._make_result("b", "world")
+        result = _cross_encoder_rerank("test", [r0, r1])
+        assert len(result) == 2
+        assert result[0].session.session_id == "a"
+
+    @patch("claude_recall.embedder.get_reranker")
+    def test_reranker_exception_returns_unchanged(self, mock_get_reranker):
+        """If reranker raises, return results unchanged."""
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.side_effect = RuntimeError("model error")
+        mock_get_reranker.return_value = mock_reranker
+
+        r0 = self._make_result("a", "hello")
+        result = _cross_encoder_rerank("test", [r0])
+        # Single result, should return as-is
+        assert len(result) == 1

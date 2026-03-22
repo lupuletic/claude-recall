@@ -11,7 +11,18 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static
+from textual.widgets import (
+    Button,
+    Footer,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    OptionList,
+    Static,
+    Switch,
+)
+from textual.widgets.option_list import Option
 
 from claude_recall.models import SearchResult
 from claude_recall.utils import clean_display_text, format_date, format_size
@@ -123,16 +134,16 @@ class PreviewPanel(Static):
 
 
 class SettingsScreen(ModalScreen):
-    """Settings modal overlay."""
+    """Settings modal overlay with arrow-key navigation."""
 
     CSS = """
     SettingsScreen {
         align: center middle;
     }
     #settings-dialog {
-        width: 65;
+        width: 80;
         height: auto;
-        max-height: 85%;
+        max-height: 90%;
         border: tall $primary;
         background: $surface;
         padding: 1 2;
@@ -143,20 +154,39 @@ class SettingsScreen(ModalScreen):
         padding: 0 0 1 0;
         color: $text-primary;
     }
+    .section-label {
+        text-style: bold;
+        padding: 1 0 0 0;
+    }
+    #mode-list {
+        height: 8;
+        margin: 0 0 0 2;
+        border: tall $border-blurred;
+    }
+    #mode-list:focus {
+        border: tall $border;
+    }
     .setting-row {
         height: 3;
-        padding: 0 0 0 0;
+        margin: 0 0 0 0;
     }
     .setting-key {
         width: 22;
-        text-style: bold;
         padding: 1 1 0 0;
     }
     .setting-value {
         width: 1fr;
     }
-    .setting-value Input {
-        width: 100%;
+    .toggle-row {
+        height: 3;
+        margin: 0 0 0 0;
+    }
+    .toggle-label {
+        width: 1fr;
+        padding: 1 0 0 0;
+    }
+    Switch {
+        width: auto;
     }
     #settings-buttons {
         height: 3;
@@ -165,14 +195,6 @@ class SettingsScreen(ModalScreen):
     }
     #settings-buttons Button {
         margin: 0 1;
-    }
-    .mode-option {
-        height: 1;
-        padding: 0 0 0 2;
-    }
-    .mode-option.selected {
-        color: $success;
-        text-style: bold;
     }
     """
 
@@ -184,25 +206,25 @@ class SettingsScreen(ModalScreen):
         from claude_recall.config import SEARCH_MODES, load_config
 
         self._config = load_config()
+        self._mode_keys = list(SEARCH_MODES.keys())
 
         with VerticalScroll(id="settings-dialog"):
             yield Static("Settings", id="settings-title")
 
-            # Search mode as a selectable list
-            yield Static("[bold]Search Mode[/bold]", markup=True)
-            for mode, desc in SEARCH_MODES.items():
-                selected = mode == self._config["search_mode"]
-                prefix = "[green bold]>[/green bold]" if selected else " "
-                yield Static(
-                    f"  {prefix} [bold]{mode}[/bold] — [dim]{desc}[/dim]",
-                    markup=True,
-                    classes=f"mode-option {'selected' if selected else ''}",
-                    id=f"mode-{mode}",
-                )
+            # Search mode — OptionList (arrow-key navigable)
+            yield Static("Search Mode", classes="section-label")
+            options = []
+            highlighted = 0
+            for i, (mode, desc) in enumerate(SEARCH_MODES.items()):
+                options.append(Option(f"{mode}  —  {desc}"))
+                if mode == self._config["search_mode"]:
+                    highlighted = i
+            ol = OptionList(*options, id="mode-list")
+            yield ol
 
-            yield Static("")
+            # Numeric inputs
+            yield Static("Search Options", classes="section-label")
 
-            # Inputs
             with Horizontal(classes="setting-row"):
                 yield Static("Results Limit", classes="setting-key")
                 yield Input(
@@ -213,81 +235,44 @@ class SettingsScreen(ModalScreen):
                 )
 
             with Horizontal(classes="setting-row"):
-                yield Static("Relevance Cutoff", classes="setting-key")
+                yield Static("Relevance Cutoff (0.0–1.0)", classes="setting-key")
                 yield Input(
                     value=str(self._config["relevance_cutoff"]),
                     id="cutoff-input",
                     classes="setting-value",
                 )
 
-            yield Static("")
+            # Toggles — Switch widgets (arrow-key & space friendly)
+            yield Static("Toggles", classes="section-label")
 
-            # Toggles as clickable labels
-            sub = "on" if self._config["show_subagents"] else "off"
-            yield Static(
-                f"  [{'green' if self._config['show_subagents'] else 'dim'}]"
-                f"[{'x' if self._config['show_subagents'] else ' '}][/] "
-                f"Show subagent sessions",
-                markup=True,
-                id="toggle-subagents",
-            )
-            hook = "on" if self._config["auto_index_hook"] else "off"
-            yield Static(
-                f"  [{'green' if self._config['auto_index_hook'] else 'dim'}]"
-                f"[{'x' if self._config['auto_index_hook'] else ' '}][/] "
-                f"Auto-install SessionEnd hook",
-                markup=True,
-                id="toggle-hook",
-            )
+            with Horizontal(classes="toggle-row"):
+                yield Static("Show subagent sessions", classes="toggle-label")
+                yield Switch(
+                    value=self._config["show_subagents"],
+                    id="switch-subagents",
+                )
 
-            yield Static("")
+            with Horizontal(classes="toggle-row"):
+                yield Static("Auto-install SessionEnd hook", classes="toggle-label")
+                yield Switch(
+                    value=self._config["auto_index_hook"],
+                    id="switch-hook",
+                )
 
             with Horizontal(id="settings-buttons"):
                 yield Button("Save", variant="primary", id="save-btn")
                 yield Button("Cancel", variant="default", id="cancel-btn")
 
-    def on_click(self, event) -> None:
-        """Handle clicks on mode options and toggles."""
-        # Find which Static widget was clicked
-        try:
-            widget = event.widget if hasattr(event, 'widget') else None
-            if widget is None or not isinstance(widget, Static):
-                return
-            widget_id = widget.id or ""
-        except Exception:
-            return
-
-        if widget_id.startswith("mode-"):
-            mode = widget_id[5:]
-            self._config["search_mode"] = mode
-            from claude_recall.config import SEARCH_MODES
-            for m in SEARCH_MODES:
-                try:
-                    w = self.query_one(f"#mode-{m}", Static)
-                    selected = m == mode
-                    prefix = "[green bold]>[/green bold]" if selected else " "
-                    desc = SEARCH_MODES[m]
-                    w.update(
-                        f"  {prefix} [bold]{m}[/bold] — [dim]{desc}[/dim]"
-                    )
-                except Exception:
-                    pass
-
-        elif widget_id == "toggle-subagents":
-            self._config["show_subagents"] = not self._config["show_subagents"]
-            v = self._config["show_subagents"]
-            widget.update(
-                f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
-                f"Show subagent sessions"
-            )
-
-        elif widget_id == "toggle-hook":
-            self._config["auto_index_hook"] = not self._config["auto_index_hook"]
-            v = self._config["auto_index_hook"]
-            widget.update(
-                f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
-                f"Auto-install SessionEnd hook"
-            )
+    def on_mount(self) -> None:
+        # Pre-select the current mode
+        ol = self.query_one("#mode-list", OptionList)
+        current_idx = 0
+        for i, key in enumerate(self._mode_keys):
+            if key == self._config["search_mode"]:
+                current_idx = i
+                break
+        ol.highlighted = current_idx
+        ol.focus()
 
     @on(Button.Pressed, "#save-btn")
     def on_save(self, event: Button.Pressed) -> None:
@@ -303,15 +288,26 @@ class SettingsScreen(ModalScreen):
     def _save_settings(self) -> None:
         from claude_recall.config import save_config
 
-        # Read inputs
+        # Search mode from OptionList
+        ol = self.query_one("#mode-list", OptionList)
+        if ol.highlighted is not None and ol.highlighted < len(self._mode_keys):
+            self._config["search_mode"] = self._mode_keys[ol.highlighted]
+
+        # Inputs
         try:
             self._config["limit"] = int(self.query_one("#limit-input", Input).value)
         except ValueError:
             pass
         try:
-            self._config["relevance_cutoff"] = float(self.query_one("#cutoff-input", Input).value)
+            self._config["relevance_cutoff"] = float(
+                self.query_one("#cutoff-input", Input).value
+            )
         except ValueError:
             pass
+
+        # Switches
+        self._config["show_subagents"] = self.query_one("#switch-subagents", Switch).value
+        self._config["auto_index_hook"] = self.query_one("#switch-hook", Switch).value
 
         save_config(self._config)
         self.dismiss(True)
