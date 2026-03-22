@@ -155,6 +155,18 @@ def upsert_session(conn: sqlite3.Connection, session: Session) -> None:
 
 def upsert_chunks(conn: sqlite3.Connection, session_id: str, chunks: list[str]) -> None:
     """Store conversation chunks for a session (replaces existing)."""
+    # Delete orphaned vector entries before deleting chunks
+    try:
+        conn.execute(
+            """DELETE FROM chunks_vec
+               WHERE chunk_rowid IN (
+                   SELECT chunk_id FROM chunks WHERE session_id = ?
+               )""",
+            (session_id,),
+        )
+    except Exception:
+        pass  # chunks_vec may not exist yet
+
     conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
     conn.executemany(
         "INSERT INTO chunks (session_id, chunk_index, chunk_text) VALUES (?, ?, ?)",
@@ -227,7 +239,7 @@ def setup_vec_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
             chunk_rowid INTEGER PRIMARY KEY,
-            embedding float[384]
+            embedding float[384] distance_metric=cosine
         )"""
     )
     # Drop old sessions_vec if migrating from v1

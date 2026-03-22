@@ -246,29 +246,37 @@ class SettingsScreen(ModalScreen):
                 yield Button("Save", variant="primary", id="save-btn")
                 yield Button("Cancel", variant="default", id="cancel-btn")
 
-    @on(Static.Click)
-    def on_static_click(self, event: Static.Click) -> None:
+    def on_click(self, event) -> None:
         """Handle clicks on mode options and toggles."""
-        widget_id = event.static.id or ""
+        # Find which Static widget was clicked
+        try:
+            widget = event.widget if hasattr(event, 'widget') else None
+            if widget is None or not isinstance(widget, Static):
+                return
+            widget_id = widget.id or ""
+        except Exception:
+            return
 
         if widget_id.startswith("mode-"):
             mode = widget_id[5:]
             self._config["search_mode"] = mode
-            # Update visual state
             from claude_recall.config import SEARCH_MODES
             for m in SEARCH_MODES:
-                w = self.query_one(f"#mode-{m}", Static)
-                selected = m == mode
-                prefix = "[green bold]>[/green bold]" if selected else " "
-                desc = SEARCH_MODES[m]
-                w.update(
-                    f"  {prefix} [bold]{m}[/bold] — [dim]{desc}[/dim]"
-                )
+                try:
+                    w = self.query_one(f"#mode-{m}", Static)
+                    selected = m == mode
+                    prefix = "[green bold]>[/green bold]" if selected else " "
+                    desc = SEARCH_MODES[m]
+                    w.update(
+                        f"  {prefix} [bold]{m}[/bold] — [dim]{desc}[/dim]"
+                    )
+                except Exception:
+                    pass
 
         elif widget_id == "toggle-subagents":
             self._config["show_subagents"] = not self._config["show_subagents"]
             v = self._config["show_subagents"]
-            event.static.update(
+            widget.update(
                 f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
                 f"Show subagent sessions"
             )
@@ -276,7 +284,7 @@ class SettingsScreen(ModalScreen):
         elif widget_id == "toggle-hook":
             self._config["auto_index_hook"] = not self._config["auto_index_hook"]
             v = self._config["auto_index_hook"]
-            event.static.update(
+            widget.update(
                 f"  [{'green' if v else 'dim'}][{'x' if v else ' '}][/] "
                 f"Auto-install SessionEnd hook"
             )

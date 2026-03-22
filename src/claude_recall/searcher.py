@@ -35,7 +35,19 @@ def search(
         return []
 
     conn = get_connection(db_path)
+    try:
+        return _search_pipeline(
+            conn, query, limit, project_filter, after, before,
+            semantic, min_messages,
+        )
+    finally:
+        conn.close()
 
+
+def _search_pipeline(
+    conn, query, limit, project_filter, after, before, semantic, min_messages,
+) -> list[SearchResult]:
+    """Core search pipeline. Connection managed by caller."""
     # Determine if we should do semantic search
     use_semantic = semantic if semantic is not None else has_vec_table(conn)
     if use_semantic:
@@ -55,37 +67,33 @@ def search(
         relaxed = _fts_search_relaxed(
             conn, query, limit * 3, project_filter, after, before, min_messages
         )
-        # Add relaxed results that aren't already in strict results
         seen = {r.session.session_id for r in fts_results}
         for r in relaxed:
             if r.session.session_id not in seen:
-                r.score *= 0.7  # penalize relaxed matches
+                r.score *= 0.7
                 fts_results.append(r)
                 seen.add(r.session.session_id)
 
     if not use_semantic:
-        # Re-normalize scores
         if fts_results:
             max_s = max(r.score for r in fts_results)
             if max_s > 0:
                 for r in fts_results:
                     r.score /= max_s
-        conn.close()
         return fts_results[:limit]
 
-    # Phase 3: Semantic search (no threshold — let RRF handle ranking)
+    # Phase 3: Semantic search
     vec_results = _vec_search(conn, query, limit * 3, project_filter, after, before, min_messages)
 
     # Phase 4: Hybrid ranking — weight semantic MORE when FTS found few results
-    fts_strength = min(len(fts_results) / 5, 1.0)  # 0..1 based on FTS result count
-    alpha = 0.3 + 0.3 * fts_strength  # 0.3 (semantic-heavy) to 0.6 (balanced)
+    fts_strength = min(len(fts_results) / 5, 1.0)
+    alpha = 0.3 + 0.3 * fts_strength
 
     combined = _reciprocal_rank_fusion(fts_results, vec_results, alpha=alpha, k=60)
 
-    # Phase 5: Cross-encoder reranking (most accurate, applied to top candidates)
+    # Phase 5: Cross-encoder reranking
     combined = _cross_encoder_rerank(query, combined[:limit * 2])
 
-    conn.close()
     return combined[:limit]
 
 
@@ -129,7 +137,7 @@ def _fts_search(
     sql = f"""
         SELECT
             s.*,
-            sessions_fts.rank as fts_rank,
+            bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -138,7 +146,7 @@ def _fts_search(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY sessions_fts.rank
+        ORDER BY bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0)
         LIMIT ?
     """
 
@@ -199,7 +207,7 @@ def _fts_search_relaxed(
     if not terms:
         return []
 
-    relaxed_query = " OR ".join(terms)
+    relaxed_query = " OR ".join(f'"{t}"' for t in terms)
 
     # Build WHERE clauses
     where_parts = ["s.is_subagent = 0"]
@@ -220,7 +228,7 @@ def _fts_search_relaxed(
 
     sql = f"""
         SELECT s.*,
-            sessions_fts.rank as fts_rank,
+            bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -229,7 +237,7 @@ def _fts_search_relaxed(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY sessions_fts.rank
+        ORDER BY bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0)
         LIMIT ?
     """
 
@@ -446,10 +454,14 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     documents = []
     for r in results:
         s = r.session
-        parts = [s.summary or "", s.first_prompt or ""]
+        parts = [s.summary or ""]
+        # Include matched chunk snippets — the reason this result was retrieved
+        if r.snippets:
+            parts.append(r.snippets[0])
+        parts.append(s.first_prompt or "")
         if s.last_prompt and s.last_prompt != s.first_prompt:
             parts.append(s.last_prompt or "")
-        doc = " ".join(p for p in parts if p)[:500]
+        doc = " ".join(p for p in parts if p)[:512]
         documents.append(doc)
 
     try:
@@ -511,13 +523,14 @@ def _prepare_fts_query(query: str) -> str:
         terms = [t for t in query.split() if len(t) > 1]
         if not terms:
             return query
-        return " OR ".join(terms)
+        return " OR ".join(f'"{t}"' for t in terms)
 
     if len(terms) == 1:
-        return terms[0]
+        return f'"{terms[0]}"'
 
+    # Quote each term to escape FTS5 special chars (colons, parens, etc.)
     # Use AND for precision — all meaningful terms must appear
-    return " AND ".join(terms)
+    return " AND ".join(f'"{t}"' for t in terms)
 
 
 def _row_to_session(row: sqlite3.Row) -> Session:
