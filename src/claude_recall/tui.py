@@ -395,15 +395,24 @@ class RecallApp(App):
 
     @on(Input.Changed, "#search-input")
     def on_search_changed(self, event: Input.Changed) -> None:
-        """Debounced search on input change. Keeps old results visible until new ones arrive."""
-        if not event.value.strip():
-            self.query_one("#status", Label).update(
-                "Type to search your Claude Code sessions"
-            )
+        """Debounced search on input change."""
+        query = event.value.strip()
+        status = self.query_one("#status", Label)
+
+        if not query:
+            status.update("Type to search your Claude Code sessions")
             self.query_one("#results", ListView).clear()
+            self._selected_result = None
+            # Clear preview
+            preview = self.query_one("#preview", PreviewPanel)
+            preview.update("[dim]Type a query to search[/dim]")
             return
-        # Don't clear results — just update status and start search
-        self.query_one("#status", Label).update("Searching...")
+
+        # Show what we're searching for — user knows search is happening
+        status.update(f'Searching for "{query}"...')
+        # Dim old results to indicate they're stale
+        list_view = self.query_one("#results", ListView)
+        list_view.styles.opacity = 0.4
         self._debounced_search(event.value)
 
     @on(Input.Submitted, "#search-input")
@@ -490,29 +499,38 @@ class RecallApp(App):
         time.sleep(0.5)
 
         if not query.strip():
-            self.call_from_thread(self._display_results, [])
+            self.call_from_thread(self._display_results, [], "")
             return
+
+        # Check if the query changed while we were waiting
+        current = self.query_one("#search-input", Input).value.strip()
+        if current != query.strip():
+            return  # User kept typing — skip this search, next one will run
 
         from claude_recall.searcher import search as do_search
 
         results = do_search(query=query, limit=20)
         self._results = results
-        self.call_from_thread(self._display_results, results)
+        self.call_from_thread(self._display_results, results, query)
 
-    def _display_results(self, results: list[SearchResult]) -> None:
+    def _display_results(self, results: list[SearchResult], query: str = "") -> None:
         """Update the results list."""
         list_view = self.query_one("#results", ListView)
         list_view.clear()
+        list_view.styles.opacity = 1.0  # Restore full opacity
 
         status = self.query_one("#status", Label)
 
         if not results:
-            status.update("No results")
+            if query:
+                status.update(f'No results for "{query}"')
+            else:
+                status.update("No results")
             return
 
         status.update(
-            f"Found {len(results)} sessions — "
-            f"Enter to focus list, ↑↓ to navigate, Enter to resume"
+            f'Found {len(results)} sessions for "{query}" — '
+            f"↓ to navigate, Enter to resume, Ctrl+D for AI summary"
         )
 
         for i, result in enumerate(results, 1):
