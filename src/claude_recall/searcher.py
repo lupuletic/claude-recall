@@ -97,18 +97,11 @@ def _search_pipeline(
     # Phase 5: Cross-encoder reranking
     combined = _cross_encoder_rerank(query, combined[:limit * 2])
 
-    # Phase 6: LLM reranking — auto-enabled when claude CLI is available
-    import shutil
-
+    # Phase 6: LLM reranking — only when explicitly set to "llm" mode
     from claude_recall.config import load_config
 
     config = load_config()
-    use_llm = config.get("search_mode") == "llm"
-    if not use_llm and config.get("search_mode") in ("hybrid", "reranked"):
-        # Auto-upgrade to LLM reranking if claude is available
-        use_llm = shutil.which("claude") is not None
-
-    if use_llm and combined:
+    if config.get("search_mode") == "llm" and combined:
         combined = _llm_rerank(query, combined[:limit])
 
     # Apply message-count boost as tiebreaker after reranking
@@ -510,6 +503,17 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     if not results or len(results) <= 1:
         return results
 
+    # Skip cross-encoder for short keyword queries (1-2 meaningful terms)
+    # Short queries like "reshot" or "git ssh" are exact matches where
+    # BM25 ranking is already correct — the cross-encoder can misrank
+    # by treating "reshot" as similar to "resize"
+    meaningful_terms = [
+        t for t in query.lower().split()
+        if t not in _STOP_WORDS and len(t) > 1
+    ]
+    if len(meaningful_terms) <= 2:
+        return results
+
     try:
         from claude_recall.embedder import get_reranker
 
@@ -519,15 +523,18 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     except ImportError:
         return results
 
-    # Build document texts for reranking — include reply for what was actually done
+    # Build document texts for reranking
     documents = []
     for r in results:
         s = r.session
         parts = [s.summary or ""]
-        # Include matched chunk snippets — the reason this result was retrieved
+        # Include matched chunk snippets
         if r.snippets:
             parts.append(r.snippets[0])
         parts.append(s.first_prompt or "")
+        # Include a sample of messages_text (contains enriched subagent content)
+        if s.messages_text:
+            parts.append(s.messages_text[:200])
         # Include first_reply — this describes the actual work done
         if s.first_reply:
             parts.append(s.first_reply)
@@ -546,6 +553,14 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     for orig_idx, ce_score in ranked:
         if orig_idx < len(results):
             r = results[orig_idx]
+            has_fts = r.fts_rank is not None
+            has_vec = r.vec_score is not None
+            # Strong boost for results matching BOTH keyword AND semantic
+            if has_fts and has_vec:
+                ce_score *= 2.0
+            # Moderate boost for FTS-only matches (exact keyword match is strong signal)
+            elif has_fts:
+                ce_score *= 1.3
             r.score = ce_score
             reranked.append(r)
 

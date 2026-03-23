@@ -629,9 +629,19 @@ def run_tui(query: str, results: list[SearchResult]) -> None:
         )
         project_path = result.session.project_path if result else None
 
-        if project_path and os.path.isdir(project_path):
-            os.chdir(project_path)
-            print(f"\ncd {project_path}", file=sys.stderr)
+        if project_path:
+            # Try the exact path first, then walk up to find an existing parent
+            resume_dir = project_path
+            while resume_dir and not os.path.isdir(resume_dir):
+                resume_dir = os.path.dirname(resume_dir)
+
+            if resume_dir and os.path.isdir(resume_dir):
+                os.chdir(resume_dir)
+                if resume_dir != project_path:
+                    print(f"\nNote: {project_path} no longer exists", file=sys.stderr)
+                    print(f"cd {resume_dir} (nearest parent)", file=sys.stderr)
+                else:
+                    print(f"\ncd {resume_dir}", file=sys.stderr)
 
         print(f"claude --resume {session_id}", file=sys.stderr)
         if sys.platform == "win32":
