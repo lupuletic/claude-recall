@@ -18,6 +18,7 @@ from claude_recall.utils import (
     _build_fts_text,
     _resolve_path_parts,
     clean_display_text,
+    generate_summary,
     decode_project_path,
     discover_sessions,
     extract_text_from_content,
@@ -529,3 +530,136 @@ class TestLoadSessionsIndex:
         (proj / "sessions-index.json").write_text("not json")
         idx = load_sessions_index("broken", tmp_path)
         assert idx == {}
+
+
+# ===========================================================================
+# generate_summary
+# ===========================================================================
+
+class TestGenerateSummary:
+    def test_none_prompt(self):
+        assert generate_summary(None, None) is None
+
+    def test_empty_prompt(self):
+        assert generate_summary("", None) is None
+
+    def test_simple_prompt(self):
+        result = generate_summary("Help me debug the auth middleware", None)
+        assert result is not None
+        assert "debug" in result.lower()
+        assert "auth" in result.lower()
+
+    def test_prompt_with_reply(self):
+        result = generate_summary(
+            "Help me debug the auth middleware",
+            "I'll look at the token validation code."
+        )
+        assert result is not None
+        assert "auth" in result.lower()
+        assert "token" in result.lower()
+
+    def test_strips_fix_issue_prefix(self):
+        result = generate_summary(
+            "Fix issue #123: [Bug]: JWT tokens expire too early",
+            "Looking at the token expiry logic."
+        )
+        assert result is not None
+        assert "#123" not in result
+        assert "JWT" in result or "token" in result.lower()
+
+    def test_strips_review_prefix(self):
+        result = generate_summary(
+            "Review this code change for issue #456: [Feature]: Add dark mode",
+            None
+        )
+        assert result is not None
+        assert "#456" not in result
+        assert "dark mode" in result.lower()
+
+    def test_strips_analyze_prefix(self):
+        result = generate_summary(
+            "Analyze this GitHub issue for automated fixing potential. Is it fixable? Some bug here",
+            None
+        )
+        assert result is not None
+        # Should strip the "Analyze this GitHub issue..." boilerplate
+        assert "automated fixing potential" not in result.lower()
+
+    def test_truncates_long_prompt(self):
+        long_prompt = "x" * 500
+        result = generate_summary(long_prompt, None)
+        assert result is not None
+        assert len(result) <= 200
+
+    def test_reply_not_duplicated_if_same(self):
+        result = generate_summary("debug auth", "debug auth")
+        assert result is not None
+        # Should not have " — debug auth" appended since it's the same
+        assert result.count("debug auth") == 1
+
+    def test_multiline_prompt_uses_first_line(self):
+        result = generate_summary(
+            "Fix the login bug\nAlso add tests\nAnd deploy",
+            None
+        )
+        assert result is not None
+        assert "login bug" in result.lower()
+        assert "deploy" not in result.lower()
+
+
+# ===========================================================================
+# _build_fts_text with assistant messages
+# ===========================================================================
+
+class TestBuildFtsTextWithAssistant:
+    def test_includes_assistant_text(self):
+        user = ["What is Python?"]
+        assistant = ["Python is a programming language."]
+        result = _build_fts_text(user, assistant)
+        assert "Python" in result
+        assert "programming language" in result
+
+    def test_interleaves_messages(self):
+        user = ["question 1", "question 2"]
+        assistant = ["answer 1", "answer 2"]
+        result = _build_fts_text(user, assistant)
+        assert "question 1" in result
+        assert "answer 1" in result
+        assert "question 2" in result
+        assert "answer 2" in result
+
+    def test_none_assistant(self):
+        """Passing None for assistant should work like before."""
+        user = ["hello world"]
+        result = _build_fts_text(user, None)
+        assert result == "hello world"
+
+    def test_empty_assistant(self):
+        user = ["hello world"]
+        result = _build_fts_text(user, [])
+        assert result == "hello world"
+
+    def test_unequal_lengths(self):
+        """Should handle user and assistant having different lengths."""
+        user = ["q1", "q2", "q3"]
+        assistant = ["a1"]
+        result = _build_fts_text(user, assistant)
+        assert "q1" in result
+        assert "a1" in result
+        assert "q3" in result
+
+
+# ===========================================================================
+# parse_session_file returns summary
+# ===========================================================================
+
+class TestParseSessionFileSummary:
+    def test_summary_generated(self, sample_jsonl_file):
+        result = parse_session_file(sample_jsonl_file)
+        assert result["summary"] is not None
+        assert len(result["summary"]) > 0
+
+    def test_summary_from_content(self, sample_jsonl_file):
+        result = parse_session_file(sample_jsonl_file)
+        # Should contain keywords from first prompt
+        assert "auth" in result["summary"].lower() or "debug" in result["summary"].lower()

@@ -19,7 +19,8 @@ SEARCH_MODES = {
     "keyword": "FTS5 keyword search only (fastest, no dependencies)",
     "semantic": "Embedding-based semantic search only",
     "hybrid": "Keyword + semantic with RRF fusion",
-    "reranked": "Hybrid + cross-encoder reranking (most accurate)",
+    "reranked": "Hybrid + cross-encoder reranking (most accurate, local)",
+    "llm": "Hybrid + reranking + Claude LLM (best quality, ~10s)",
 }
 
 

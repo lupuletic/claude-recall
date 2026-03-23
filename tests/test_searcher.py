@@ -10,6 +10,7 @@ import pytest
 from claude_recall.db import get_connection, upsert_chunks, upsert_session
 from claude_recall.models import SearchResult, Session
 from claude_recall.searcher import (
+    _apply_depth_boost,
     _cross_encoder_rerank,
     _fts_search,
     _prepare_fts_query,
@@ -31,6 +32,12 @@ class TestPrepareFtsQuery:
 
     def test_single_keyword(self):
         result = _prepare_fts_query("authentication")
+        # Prefix matching: single term gets OR with prefix variant
+        assert '"authentication"' in result
+        assert '"authentication"*' in result
+
+    def test_single_keyword_no_prefix(self):
+        result = _prepare_fts_query("authentication", use_prefix=False)
         assert result == '"authentication"'
 
     def test_multiple_keywords_and_join(self):
@@ -38,6 +45,12 @@ class TestPrepareFtsQuery:
         assert '"debug"' in result
         assert '"middleware"' in result
         assert " AND " in result
+
+    def test_prefix_matching_in_multi_keyword(self):
+        result = _prepare_fts_query("auth middleware")
+        # Each term >= 3 chars gets prefix variant
+        assert '"auth"*' in result
+        assert '"middleware"*' in result
 
     def test_stop_words_filtered(self):
         result = _prepare_fts_query("the bug in authentication")
@@ -452,3 +465,131 @@ class TestCrossEncoderRerank:
         result = _cross_encoder_rerank("test", [r0])
         # Single result, should return as-is
         assert len(result) == 1
+
+
+# ===========================================================================
+# _apply_depth_boost
+# ===========================================================================
+
+class TestApplyDepthBoost:
+    def _make_result(self, session_id: str, message_count: int, score: float) -> SearchResult:
+        s = Session(
+            session_id=session_id,
+            project_path="/test",
+            project_dir="test",
+            file_path=f"/tmp/{session_id}.jsonl",
+            message_count=message_count,
+        )
+        return SearchResult(session=s, score=score)
+
+    def test_single_message_no_boost(self):
+        r = self._make_result("a", 1, 1.0)
+        _apply_depth_boost([r])
+        # 1 msg → log2(1)=0, boost=1.0
+        assert r.score == pytest.approx(1.0)
+
+    def test_multi_message_gets_boost(self):
+        r1 = self._make_result("a", 1, 1.0)
+        r10 = self._make_result("b", 10, 1.0)
+        _apply_depth_boost([r1, r10])
+        # 10 msgs → log2(10)≈3.32, boost≈1.332
+        assert r10.score > r1.score
+
+    def test_boost_is_mild(self):
+        r = self._make_result("a", 100, 1.0)
+        _apply_depth_boost([r])
+        # Even 100 msgs shouldn't boost more than ~1.7x
+        assert r.score < 2.0
+
+    def test_preserves_relative_ordering_from_score(self):
+        """A strong-scoring 1-msg session should still beat a weak-scoring 50-msg one."""
+        r_strong = self._make_result("strong", 1, 1.0)
+        r_weak = self._make_result("weak", 50, 0.3)
+        _apply_depth_boost([r_strong, r_weak])
+        assert r_strong.score > r_weak.score
+
+
+# ===========================================================================
+# _prepare_fts_query prefix matching
+# ===========================================================================
+
+class TestPrepareFtsQueryPrefix:
+    def test_prefix_disabled(self):
+        result = _prepare_fts_query("auth middleware", use_prefix=False)
+        assert "*" not in result
+        assert '"auth"' in result
+        assert '"middleware"' in result
+
+    def test_short_terms_no_prefix(self):
+        """Terms shorter than 3 chars should not get prefix matching."""
+        result = _prepare_fts_query("go db")
+        assert '"go"' in result
+        assert '"db"' in result
+        # short terms don't get prefix
+        assert '"go"*' not in result
+        assert '"db"*' not in result
+
+
+# ===========================================================================
+# Integration: summary in search results
+# ===========================================================================
+
+class TestSearchWithSummary:
+    @pytest.fixture
+    def search_db_with_summary(self, db_path: Path):
+        """Create a DB with sessions that have summaries."""
+        conn = get_connection(db_path)
+
+        sessions = [
+            Session(
+                session_id="sum1",
+                project_path="/Users/test/myapp",
+                project_dir="-Users-test-myapp",
+                file_path="/tmp/sum1.jsonl",
+                summary="Debugging JWT authentication token validation errors",
+                first_prompt="Help me debug the auth",
+                first_reply="Looking at the JWT validation code.",
+                messages_text="auth debug jwt token validation",
+                message_count=15,
+                file_size=4096,
+                created="2025-01-15T10:00:00Z",
+                modified="2025-01-15T11:00:00Z",
+                mtime=1736935800.0,
+                is_subagent=False,
+            ),
+            Session(
+                session_id="sum2",
+                project_path="/Users/test/myapp",
+                project_dir="-Users-test-myapp",
+                file_path="/tmp/sum2.jsonl",
+                summary="Setting up PostgreSQL database migration scripts",
+                first_prompt="Create db migration",
+                first_reply="Creating Alembic migration.",
+                messages_text="database migration postgresql alembic",
+                message_count=8,
+                file_size=2048,
+                created="2025-02-01T08:00:00Z",
+                modified="2025-02-01T10:00:00Z",
+                mtime=1738396800.0,
+                is_subagent=False,
+            ),
+        ]
+
+        for s in sessions:
+            upsert_session(conn, s)
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_summary_boosts_relevance(self, search_db_with_summary):
+        """Sessions with matching summaries should rank high."""
+        results = search("JWT authentication", db_path=search_db_with_summary, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "sum1"
+
+    def test_summary_keyword_in_results(self, search_db_with_summary):
+        """Searching for terms only in summary should still find results."""
+        results = search("PostgreSQL", db_path=search_db_with_summary, semantic=False)
+        assert len(results) >= 1
+        ids = [r.session.session_id for r in results]
+        assert "sum2" in ids

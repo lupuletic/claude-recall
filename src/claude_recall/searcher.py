@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from pathlib import Path
 
@@ -70,11 +71,13 @@ def _search_pipeline(
         seen = {r.session.session_id for r in fts_results}
         for r in relaxed:
             if r.session.session_id not in seen:
-                r.score *= 0.7
+                r.score *= 0.5  # heavier penalty for OR-only matches
                 fts_results.append(r)
                 seen.add(r.session.session_id)
 
     if not use_semantic:
+        # Apply message-count boost before final normalization
+        _apply_depth_boost(fts_results)
         if fts_results:
             max_s = max(r.score for r in fts_results)
             if max_s > 0:
@@ -93,6 +96,22 @@ def _search_pipeline(
 
     # Phase 5: Cross-encoder reranking
     combined = _cross_encoder_rerank(query, combined[:limit * 2])
+
+    # Phase 6: Optional LLM reranking (claude -p) for highest quality
+    from claude_recall.config import load_config
+
+    config = load_config()
+    if config.get("search_mode") == "llm":
+        combined = _llm_rerank(query, combined[:limit])
+
+    # Apply message-count boost as tiebreaker after reranking
+    _apply_depth_boost(combined)
+    if combined:
+        max_s = max(r.score for r in combined)
+        if max_s > 0:
+            for r in combined:
+                r.score /= max_s
+        combined.sort(key=lambda r: r.score, reverse=True)
 
     return combined[:limit]
 
@@ -137,7 +156,7 @@ def _fts_search(
     sql = f"""
         SELECT
             s.*,
-            bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -146,7 +165,7 @@ def _fts_search(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0)
         LIMIT ?
     """
 
@@ -228,7 +247,7 @@ def _fts_search_relaxed(
 
     sql = f"""
         SELECT s.*,
-            bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -237,7 +256,7 @@ def _fts_search_relaxed(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 10.0, 5.0, 3.0, 1.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0)
         LIMIT ?
     """
 
@@ -415,6 +434,19 @@ def _reciprocal_rank_fusion(
     return combined
 
 
+def _apply_depth_boost(results: list[SearchResult]) -> None:
+    """Mildly boost scores for sessions with more messages.
+
+    Uses log2(message_count) as a multiplier:
+      1 msg → 1.0x, 5 msgs → ~1.16x, 10 msgs → ~1.22x, 50 msgs → ~1.35x
+    This acts as a tiebreaker favoring substantive conversations.
+    """
+    for r in results:
+        mc = max(r.session.message_count, 1)
+        boost = 1.0 + 0.1 * math.log2(mc)
+        r.score *= boost
+
+
 # Common English stop words that pollute FTS results
 _STOP_WORDS = {
     "a", "an", "the", "is", "it", "in", "on", "at", "to", "for", "of",
@@ -450,7 +482,7 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     except ImportError:
         return results
 
-    # Build document texts for reranking
+    # Build document texts for reranking — include reply for what was actually done
     documents = []
     for r in results:
         s = r.session
@@ -459,9 +491,12 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
         if r.snippets:
             parts.append(r.snippets[0])
         parts.append(s.first_prompt or "")
+        # Include first_reply — this describes the actual work done
+        if s.first_reply:
+            parts.append(s.first_reply)
         if s.last_prompt and s.last_prompt != s.first_prompt:
             parts.append(s.last_prompt or "")
-        doc = " ".join(p for p in parts if p)[:512]
+        doc = " ".join(p for p in parts if p)[:768]
         documents.append(doc)
 
     try:
@@ -498,11 +533,48 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     return reranked
 
 
-def _prepare_fts_query(query: str) -> str:
+def _llm_rerank(query: str, results: list[SearchResult]) -> list[SearchResult]:
+    """Rerank using Claude via `claude -p` for highest quality results."""
+    if not results:
+        return results
+
+    import sys
+
+    print("  Reranking with Claude...", end="", file=sys.stderr, flush=True)
+
+    from claude_recall.llm_reranker import llm_rerank
+
+    candidates = []
+    for r in results:
+        s = r.session
+        candidates.append({
+            "summary": s.summary,
+            "first_prompt": s.first_prompt,
+            "last_prompt": s.last_prompt,
+            "project_path": s.project_path,
+            "message_count": s.message_count,
+        })
+
+    ranked_indices = llm_rerank(query, candidates)
+
+    print(" done.", file=sys.stderr)
+
+    reranked = []
+    for rank, idx in enumerate(ranked_indices):
+        if idx < len(results):
+            r = results[idx]
+            r.score = 1.0 - (rank / max(len(ranked_indices), 1))
+            reranked.append(r)
+
+    return reranked
+
+
+def _prepare_fts_query(query: str, use_prefix: bool = True) -> str:
     """Prepare a search query for FTS5.
 
     Extracts meaningful keywords, filters stop words,
     and joins with AND for precise matching.
+    Uses prefix matching (*) so "auth" finds "authentication" etc.
     """
     query = query.strip()
     if not query:
@@ -525,12 +597,25 @@ def _prepare_fts_query(query: str) -> str:
             return query
         return " OR ".join(f'"{t}"' for t in terms)
 
+    # Use prefix matching for terms >= 3 chars (avoids noise from very short prefixes)
+    suffix = "*" if use_prefix else ""
+
     if len(terms) == 1:
-        return f'"{terms[0]}"'
+        t = terms[0]
+        if use_prefix and len(t) >= 3:
+            return f'"{t}" OR "{t}"{suffix}'
+        return f'"{t}"'
 
     # Quote each term to escape FTS5 special chars (colons, parens, etc.)
     # Use AND for precision — all meaningful terms must appear
-    return " AND ".join(f'"{t}"' for t in terms)
+    # Add prefix variants so "auth" matches "authentication"
+    parts = []
+    for t in terms:
+        if use_prefix and len(t) >= 3:
+            parts.append(f'("{t}" OR "{t}"{suffix})')
+        else:
+            parts.append(f'"{t}"')
+    return " AND ".join(parts)
 
 
 def _row_to_session(row: sqlite3.Row) -> Session:

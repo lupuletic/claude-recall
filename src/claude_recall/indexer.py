@@ -100,12 +100,15 @@ def build_index(
         # Decode project path
         project_path = decode_project_path(project_dir, projects_dir)
 
+        # Use sessions-index summary if available, otherwise auto-generate
+        summary = idx_meta.get("summary") or parsed.get("summary")
+
         session = Session(
             session_id=session_id,
             project_path=project_path,
             project_dir=project_dir,
             file_path=session_info["file_path"],
-            summary=idx_meta.get("summary"),
+            summary=summary,
             first_prompt=parsed["first_prompt"],
             first_reply=parsed["first_reply"],
             last_prompt=parsed["last_prompt"],
@@ -136,6 +139,12 @@ def build_index(
                 end="",
                 file=sys.stderr,
             )
+
+    # Enrich parent sessions with subagent content
+    # This ensures searching for terms that only appear in subagents
+    # still finds the parent session
+    if indexed > 0:
+        _enrich_parents_with_subagent_content(conn, verbose)
 
     # Generate embeddings if semantic is available (unless deferred)
     embeddings_generated = 0
@@ -242,6 +251,52 @@ def _spawn_background_embeddings(db_path: Path, projects_dir: Path, verbose: boo
             stderr=sp.DEVNULL,
             start_new_session=True,
         )
+
+
+def _enrich_parents_with_subagent_content(conn, verbose: bool = False) -> None:
+    """Append subagent first_prompts to parent session messages_text.
+
+    This ensures that searching for terms only used in subagent sessions
+    (e.g. project names, specific tools) still finds the parent session.
+    """
+    rows = conn.execute(
+        """SELECT s.session_id AS sub_id, s.parent_session, s.first_prompt
+           FROM sessions s
+           WHERE s.is_subagent = 1 AND s.parent_session IS NOT NULL
+           AND s.first_prompt IS NOT NULL"""
+    ).fetchall()
+
+    if not rows:
+        return
+
+    # Group subagent prompts by parent
+    parent_extras: dict[str, list[str]] = {}
+    for row in rows:
+        parent_id = row["parent_session"]
+        prompt = row["first_prompt"]
+        if prompt and prompt.strip():
+            parent_extras.setdefault(parent_id, []).append(prompt[:200])
+
+    enriched = 0
+    for parent_id, extras in parent_extras.items():
+        extra_text = "\n".join(extras)
+        # Append to the parent's messages_text
+        conn.execute(
+            """UPDATE sessions
+               SET messages_text = COALESCE(messages_text, '') || ? || ?
+               WHERE session_id = ? AND is_subagent = 0""",
+            ("\n", extra_text, parent_id),
+        )
+        enriched += 1
+
+    if enriched:
+        conn.commit()
+        # Rebuild FTS for enriched parents
+        conn.execute("INSERT INTO sessions_fts(sessions_fts) VALUES('rebuild')")
+        conn.commit()
+
+    if verbose and enriched:
+        print(f"\n  Enriched {enriched} parent sessions with subagent content", file=sys.stderr)
 
 
 def _generate_embeddings(

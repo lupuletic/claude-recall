@@ -200,12 +200,14 @@ def parse_session_file(file_path: str | Path) -> dict:
     except OSError:
         pass
 
-    # Build FTS text: smart sampling of user messages
-    # Instead of just first 10K, sample from beginning, middle, and end
-    messages_text = _build_fts_text(user_messages)
+    # Build FTS text: smart sampling of user + assistant messages
+    messages_text = _build_fts_text(user_messages, assistant_texts)
 
     # Build conversation chunks for embedding
     chunks = _build_chunks(user_messages, assistant_texts)
+
+    # Auto-generate summary from first prompt + reply
+    summary = generate_summary(first_prompt, first_reply)
 
     return {
         "first_prompt": first_prompt,
@@ -215,6 +217,7 @@ def parse_session_file(file_path: str | Path) -> dict:
         "messages_text": messages_text,
         "message_count": len(user_messages),
         "chunks": chunks,
+        "summary": summary,
     }
 
 
@@ -224,28 +227,33 @@ CHUNK_OVERLAP = 1  # overlapping messages between chunks
 MAX_CHUNK_CHARS = 1000  # max chars per chunk text
 
 
-def _build_fts_text(user_messages: list[str]) -> str:
+def _build_fts_text(user_messages: list[str], assistant_texts: list[str] | None = None) -> str:
     """Build FTS-indexed text by sampling messages throughout the conversation.
 
+    Interleaves user and assistant messages for richer keyword coverage.
     For short conversations (< 20 msgs): include everything.
     For longer ones: take first 5, every Nth from middle, and last 5.
     This ensures keywords from any part of the conversation are searchable.
     """
-    n = len(user_messages)
+    # Interleave user and assistant messages for better coverage
+    all_messages: list[str] = []
+    assistant = assistant_texts or []
+    for i in range(max(len(user_messages), len(assistant))):
+        if i < len(user_messages) and user_messages[i].strip():
+            all_messages.append(user_messages[i])
+        if i < len(assistant) and assistant[i].strip():
+            all_messages.append(assistant[i])
+
+    n = len(all_messages)
     if n <= 20:
-        # Short conversation — include all
-        text = "\n".join(user_messages)
+        text = "\n".join(all_messages)
     else:
-        # Sample: first 5 + every Nth + last 5
         sampled = []
-        # First 5
-        sampled.extend(user_messages[:5])
-        # Middle: every Nth message to stay within budget
-        middle = user_messages[5:-5]
-        step = max(1, len(middle) // 15)  # aim for ~15 middle samples
+        sampled.extend(all_messages[:5])
+        middle = all_messages[5:-5]
+        step = max(1, len(middle) // 15)
         sampled.extend(middle[::step])
-        # Last 5
-        sampled.extend(user_messages[-5:])
+        sampled.extend(all_messages[-5:])
         text = "\n".join(sampled)
 
     if len(text) > MAX_MESSAGES_TEXT:
@@ -371,6 +379,56 @@ def discover_sessions(projects_dir: Path = PROJECTS_DIR) -> list[dict]:
             })
 
     return sessions
+
+
+def generate_summary(first_prompt: str | None, first_reply: str | None) -> str | None:
+    """Generate a short summary from the first prompt and reply.
+
+    Extracts the core intent by stripping boilerplate prefixes
+    and combining with key context from the assistant's reply.
+    Returns ~150 chars of dense, keyword-rich text for FTS ranking.
+    """
+    if not first_prompt:
+        return None
+
+    text = first_prompt.strip()
+
+    # Strip common boilerplate prefixes from automated sessions
+    _PREFIXES = [
+        re.compile(r"^Fix issue #\d+:\s*\[[\w]+\]:\s*", re.IGNORECASE),
+        re.compile(r"^Review this code change for issue #\d+:\s*\[[\w]+\]:\s*", re.IGNORECASE),
+        re.compile(r"^Analyze this GitHub issue[^.]*\.\s*", re.IGNORECASE),
+        re.compile(r"^## Merge target:.*?\n", re.IGNORECASE),
+        re.compile(r"^## Code Review.*?\n", re.IGNORECASE),
+        re.compile(r"^Given the query and candidates in the input,.*", re.IGNORECASE),
+    ]
+    for pat in _PREFIXES:
+        text = pat.sub("", text).strip()
+
+    if not text:
+        text = first_prompt.strip()
+
+    # Take first meaningful sentence/line (up to 120 chars)
+    # Split on sentence boundaries or newlines
+    for sep in ["\n", ". ", "! ", "? "]:
+        if sep in text[:150]:
+            text = text[:text.index(sep, 0, 150)]
+            break
+    text = text[:120].strip()
+
+    # Append context from first_reply if it adds new keywords
+    if first_reply:
+        reply_text = first_reply.strip()
+        # Take first sentence of reply
+        for sep in ["\n", ". ", "! ", "? "]:
+            if sep in reply_text[:120]:
+                reply_text = reply_text[:reply_text.index(sep, 0, 120)]
+                break
+        reply_text = reply_text[:80].strip()
+        if reply_text and reply_text.lower() != text.lower():
+            text = f"{text} — {reply_text}"
+
+    return text[:200] if text else None
 
 
 def format_size(size_bytes: int) -> str:
