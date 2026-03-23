@@ -364,6 +364,7 @@ class RecallApp(App):
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
         Binding("tab", "toggle_preview", "Preview", show=True),
+        Binding("ctrl+d", "summarize", "AI Summary", show=True),
         Binding("ctrl+s", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
@@ -394,15 +395,15 @@ class RecallApp(App):
 
     @on(Input.Changed, "#search-input")
     def on_search_changed(self, event: Input.Changed) -> None:
-        """Debounced search on input change."""
-        status = self.query_one("#status", Label)
-        if event.value.strip():
-            status.update("Searching...")
-        else:
-            status.update("Type to search your Claude Code sessions")
-            # Clear results when search is empty
+        """Debounced search on input change. Keeps old results visible until new ones arrive."""
+        if not event.value.strip():
+            self.query_one("#status", Label).update(
+                "Type to search your Claude Code sessions"
+            )
             self.query_one("#results", ListView).clear()
             return
+        # Don't clear results — just update status and start search
+        self.query_one("#status", Label).update("Searching...")
         self._debounced_search(event.value)
 
     @on(Input.Submitted, "#search-input")
@@ -509,6 +510,68 @@ class RecallApp(App):
         """Toggle the preview panel."""
         preview = self.query_one("#preview", PreviewPanel)
         preview.toggle_class("visible")
+
+    def action_summarize(self) -> None:
+        """Generate an AI summary of the selected session using claude -p."""
+        if not self._selected_result:
+            return
+        preview = self.query_one("#preview", PreviewPanel)
+        preview.toggle_class("visible")
+        if "visible" not in preview.classes:
+            preview.add_class("visible")
+        preview.update("[bold]Generating AI summary...[/bold]")
+        self._run_summarize(self._selected_result)
+
+    @work(exclusive=True, thread=True)
+    def _run_summarize(self, result: SearchResult) -> None:
+        """Run claude -p to summarize a session."""
+        import shutil
+        import subprocess
+
+        s = result.session
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            self.call_from_thread(
+                self.query_one("#preview", PreviewPanel).update,
+                "[red]Claude CLI not found[/red]",
+            )
+            return
+
+        prompt = (
+            f"Summarize this Claude Code session in 3-5 bullet points. "
+            f"What was the goal? What was accomplished? What was the last thing worked on?\n\n"
+            f"Project: {result.display_project}\n"
+            f"First message: {(s.first_prompt or '')[:300]}\n"
+            f"Last message: {(s.last_prompt or '')[:300]}\n"
+            f"Messages: {s.message_count}\n"
+        )
+
+        try:
+            proc = subprocess.run(
+                [claude_bin, "-p", "--model", "haiku", "--no-session-persistence"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            summary = proc.stdout.strip() if proc.returncode == 0 else "Summary failed"
+        except Exception as e:
+            summary = f"Error: {e}"
+
+        title = _session_title(s, 120)
+        output = (
+            f"[bold underline]{title}[/bold underline]\n\n"
+            f"[bold]Project:[/bold]  {result.display_project}\n"
+            f"[bold]Date:[/bold]     {format_date(s.modified)}\n"
+            f"[bold]Messages:[/bold] {s.message_count}\n\n"
+            f"[bold]AI Summary:[/bold]\n{summary}\n\n"
+            f"[bold green]↵ Enter to resume[/bold green]  "
+            f"[dim]ID: {s.session_id}[/dim]"
+        )
+        self.call_from_thread(
+            self.query_one("#preview", PreviewPanel).update,
+            output,
+        )
 
     def action_open_settings(self) -> None:
         """Open the settings modal."""

@@ -35,9 +35,9 @@ all = ["claude-recall[semantic,tui]"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 [project.urls]
-Homepage = "https://github.com/anthropics/claude-recall"
-Repository = "https://github.com/anthropics/claude-recall"
-Issues = "https://github.com/anthropics/claude-recall/issues"
+Homepage = "https://github.com/lupuletic/claude-recall"
+Repository = "https://github.com/lupuletic/claude-recall"
+Issues = "https://github.com/lupuletic/claude-recall/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_recall"]

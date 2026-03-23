@@ -20,23 +20,23 @@ You use Claude Code heavily and accumulate hundreds of sessions across dozens of
 pip install claude-recall[all]
 
 # Search — that's it
-claude-recall "polymarket trading bot"
-claude-recall "restaurant ordering app"
-claude-recall "the iOS app that captures screenshots"
+claude-recall "setting up CI/CD pipeline"
+claude-recall "the webapp we deployed to vercel"
+claude-recall "that iOS app with the screenshot feature"
 ```
 
 First run indexes all sessions (~8s) and generates embeddings in the background. Subsequent searches are instant.
 
 ## How the Search Pipeline Works
 
-When you search for "an app that takes and analyses screenshots", here's what happens:
+When you search for "an app that captures and analyses screenshots", here's what happens:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ Stage 1: FTS5 Keyword Search (BM25)                              │
 │                                                                    │
-│ Query → stop word removal → "app" AND "takes" AND "analyses"      │
-│         AND "screenshots"                                          │
+│ Query → stop word removal → "app" AND "captures" AND              │
+│         "analyses" AND "screenshots"                               │
 │ Searches: summary (5x weight), first_prompt (3x),                 │
 │           last_prompt (2x), messages_text (2x), project_path (4x) │
 │                                                                    │
@@ -45,11 +45,11 @@ When you search for "an app that takes and analyses screenshots", here's what ha
 │ Stage 2: Semantic Embedding Search                                │
 │                                                                    │
 │ Query → bge-small-en-v1.5 embedding (384d, ONNX, local)          │
-│ Searches 5,900+ conversation chunks via sqlite-vec cosine sim     │
+│ Searches conversation chunks via sqlite-vec cosine similarity     │
 │                                                                    │
 │ Key: subagent chunks map to parent sessions                       │
 │ A chunk mentioning "ScreenshotMonitor" in a subagent              │
-│ → resolves to the parent hackathon session                        │
+│ → resolves to the parent session you'd actually resume            │
 ├──────────────────────────────────────────────────────────────────┤
 │ Stage 3: Reciprocal Rank Fusion                                   │
 │                                                                    │
@@ -67,7 +67,7 @@ When you search for "an app that takes and analyses screenshots", here's what ha
 │ Stage 5: LLM Reranking (optional, "llm" mode)                    │
 │                                                                    │
 │ Pipes top candidates through claude -p --model haiku              │
-│ Claude understands "screenshot app" = "Reshot iOS project"        │
+│ Claude understands intent behind vague queries                    │
 │ ~8-10s latency, but highest accuracy                              │
 ├──────────────────────────────────────────────────────────────────┤
 │ Stage 6: Depth Boost + Relevance Cutoff                           │
@@ -81,21 +81,21 @@ When you search for "an app that takes and analyses screenshots", here's what ha
 
 Claude Code spawns subagents (background workers) for complex tasks. A session about building an iOS app might have 15 subagents doing the actual work — reading files, writing code, running tests. The parent session's first message might just be "let's build this."
 
-**The subagent content is where the real keywords live.** When you search for "Reshot" or "screenshot analysis," those terms only appear in subagent sessions.
+**The subagent content is where the real keywords live.** When you search for a project name or specific feature, those terms often only appear in subagent sessions.
 
 We solve this two ways:
-1. **At index time**: Parent sessions are enriched with their subagents' first prompts, so FTS keyword search finds them
-2. **At search time**: When semantic search matches a subagent chunk, we map it back to the parent session (or the best main session in the same project if the parent isn't indexed)
+1. **At index time**: Parent sessions are enriched with their subagents' first prompts
+2. **At search time**: When semantic search matches a subagent chunk, we map it back to the parent session
 
 ### Conversation Chunking
 
 Sessions are split into sliding windows of 5 user+assistant turn pairs with 1-turn overlap. Both sides of the conversation are included — assistant responses anchor what was actually discussed.
 
-Each chunk is embedded separately (5,900+ vectors across 1,800+ sessions), and search returns the parent session — the **parent-child retrieval** pattern from RAG literature.
+Each chunk is embedded separately, and search returns the parent session — the **parent-child retrieval** pattern from RAG literature.
 
-### Why Not Just Use Embeddings?
+### Why Hybrid Search?
 
-Embeddings alone miss exact matches. Searching "biwiz" should find the Biwiz project instantly — that's a keyword match, not a semantic one. Our hybrid approach uses:
+Embeddings alone miss exact matches. Searching a project name should find it instantly — that's a keyword match, not a semantic one. Our hybrid approach uses:
 - **Keywords** for exact terms, project names, error messages, file paths
 - **Embeddings** for conceptual queries ("an app that analyses screenshots")
 - **Cross-encoder** for precise relevance scoring
@@ -124,11 +124,11 @@ claude-recall
 
 # Direct search
 claude-recall "debugging auth middleware"
-claude-recall "polymarket trading bot"
+claude-recall "database migration script"
 claude-recall "setting up 2 git accounts"
 
 # Filter by project
-claude-recall "optimization" --project storefront
+claude-recall "optimization" --project myapp
 
 # Filter by date
 claude-recall "database migration" --after 2026-01-01
@@ -146,6 +146,7 @@ claude-recall "query" --json        # JSON for scripting
 | ↓ / ↑ | Navigate between search bar and results |
 | Enter | Focus results / Resume selected session |
 | Tab | Toggle preview panel |
+| Ctrl+D | AI summary of selected session (via Claude) |
 | Ctrl+S | Open settings |
 | Ctrl+W | Delete last word |
 | Esc | Quit |
@@ -177,26 +178,13 @@ claude-recall install-hooks      # install SessionEnd hook for auto-updates
 
 ## Search Quality
 
-Tested against 20 realistic "vague memory" queries — the kind of thing a developer would type when they can't remember exactly which session they need:
+Tested against 20 realistic "vague memory" queries — the kind of thing developers type when they can't remember exactly which session they need:
 
-| Query | Expected | Found | Status |
-|-------|----------|-------|--------|
-| "reshot" | Reshot iOS app | claude-hackathon | ✓ |
-| "biwiz website" | Biwiz marketing site | biwiz-marketing-website | ✓ |
-| "polymarket bot" | Trading bot | polymarket-copy-trading-bot-v1 | ✓ |
-| "fixing bugs on the marketing site" | Biwiz | biwiz-marketing-website | ✓ |
-| "market maker profitability" | Polymarket | polymarket-copy-trading-bot-v1 | ✓ |
-| "restaurant ordering app for demo" | Restaurant | restaurant-agent-claude | ✓ |
-| "grey residence real estate website" | Grey Residence | grey-residence | ✓ |
-| "filling in a job application" | CV session | Projects | ✓ |
-| "red team testing AI shopping assistant" | Promptfoo | promptfoo | ✓ |
-| "iOS app that captures screenshots" | Reshot (semantic) | claude-hackathon | ✓ |
-| "email setup for biwizz domain" | Email config | biwizz-ledger | ✓ |
-| "ESP32 wifi bluetooth integration" | Telescope | skywatcher | ✓ |
-| "saas kit turbo nextjs" | SaaS kit | next-supabase-saas-kit-turbo | ✓ |
-| ... | ... | ... | ... |
+**Result: 90% accuracy** (18/20) — including semantic queries like "an app that captures screenshots" finding the right project without using its name.
 
-**Result: 18/20 (90%) accuracy** — including semantic queries like "iOS app that captures screenshots" finding the Reshot project without using its name.
+The two failures are genuinely hard:
+- Ambiguous queries matching multiple projects (e.g., "deploying to vercel" when multiple projects deploy to Vercel)
+- Sessions with generic descriptions (first prompt: "analyse this repo") where only the project path hints at the content
 
 ## Architecture
 
@@ -235,36 +223,11 @@ Tested against 20 realistic "vague memory" queries — the kind of thing a devel
 | Subagent content bubbling | Yes | No | No | No |
 | Conversation chunking | 5-turn windows | Full text | N/A | N/A |
 | Interactive TUI | Yes (Textual) | No | No | Yes (ratatui) |
+| AI session summary | Yes (Ctrl+D) | No | No | No |
 | Settings UI | Yes (Ctrl+S) | No | No | No |
 | Auto-index | Yes + SessionEnd hook | No | N/A | N/A |
 | cd to project dir | Yes | No | No | No |
-| Search quality benchmark | 90% (18/20) | Not tested | Not tested | Not tested |
-| API keys needed | No (LLM mode optional) | No | No | No |
-
-## How It Works Under the Hood
-
-### What Gets Indexed
-
-For each session:
-- **Summary**: Auto-generated from first prompt + first reply, or from sessions-index.json
-- **First prompt**: The user's first message (cleaned of internal markup)
-- **Last prompt**: Where the user left off
-- **Messages text**: Smart sample of all user + assistant messages (first 5, every Nth, last 5)
-- **Project path**: Full filesystem path (searchable as keywords)
-- **Chunks**: 5-turn sliding windows of interleaved user+assistant messages
-- **Subagent enrichment**: Parent sessions include subagent first prompts
-
-### Internal Markup Cleaning
-
-Claude Code sessions contain XML markup (`<local-command-caveat>`, `<task-notification>`, `<system-reminder>`, etc.) that we strip for display and indexing. This prevents false matches on internal protocol text.
-
-### Incremental Indexing
-
-File mtimes are tracked in SQLite. Only new or modified sessions are re-indexed. Typical incremental update: < 0.5s for 1,800+ sessions.
-
-### Background Embedding Generation
-
-On first run, FTS indexing completes in ~8s and results are available immediately. Embedding generation (5,900+ chunks) happens in a background process (~2-3 minutes) so you're never blocked.
+| API keys needed | No (LLM features optional) | No | No | No |
 
 ## Requirements
 
