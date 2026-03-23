@@ -330,10 +330,40 @@ def _vec_search(
     ).fetchall()
 
     # Group by session, keeping best chunk score per session
+    # For subagent chunks, map to their parent session
     session_best: dict[str, tuple[float, str]] = {}  # session_id -> (similarity, chunk_text)
     for row in rows:
         similarity = 1.0 - row["distance"]
         sid = row["session_id"]
+
+        # If this is a subagent, map to the nearest main session
+        sub_row = conn.execute(
+            "SELECT parent_session, is_subagent, project_dir FROM sessions WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        if sub_row and sub_row["is_subagent"]:
+            parent_id = sub_row["parent_session"]
+            # Check if parent exists in index
+            parent_exists = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? AND is_subagent = 0",
+                (parent_id,),
+            ).fetchone() if parent_id else None
+
+            if parent_exists:
+                sid = parent_id
+            else:
+                # Parent not indexed — find any main session in same project
+                fallback = conn.execute(
+                    """SELECT session_id FROM sessions
+                       WHERE project_dir = ? AND is_subagent = 0
+                       ORDER BY message_count DESC LIMIT 1""",
+                    (sub_row["project_dir"],),
+                ).fetchone()
+                if fallback:
+                    sid = fallback["session_id"]
+                else:
+                    continue  # no main session found
+
         if sid not in session_best or similarity > session_best[sid][0]:
             session_best[sid] = (similarity, row["chunk_text"][:200])
 
