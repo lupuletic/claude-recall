@@ -54,6 +54,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     first_prompt,
     last_prompt,
     messages_text,
+    project_path,
     content=sessions,
     content_rowid=rowid,
     tokenize='porter unicode61'
@@ -61,20 +62,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 
 -- Triggers to keep FTS in sync with the sessions table
 CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN
-    INSERT INTO sessions_fts(rowid, summary, first_prompt, last_prompt, messages_text)
-    VALUES (new.rowid, new.summary, new.first_prompt, new.last_prompt, new.messages_text);
+    INSERT INTO sessions_fts(rowid, summary, first_prompt, last_prompt, messages_text, project_path)
+    VALUES (new.rowid, new.summary, new.first_prompt, new.last_prompt, new.messages_text, new.project_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN
-    INSERT INTO sessions_fts(sessions_fts, rowid, summary, first_prompt, last_prompt, messages_text)
-    VALUES ('delete', old.rowid, old.summary, old.first_prompt, old.last_prompt, old.messages_text);
+    INSERT INTO sessions_fts(sessions_fts, rowid, summary, first_prompt, last_prompt, messages_text, project_path)
+    VALUES ('delete', old.rowid, old.summary, old.first_prompt, old.last_prompt, old.messages_text, old.project_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN
-    INSERT INTO sessions_fts(sessions_fts, rowid, summary, first_prompt, last_prompt, messages_text)
-    VALUES ('delete', old.rowid, old.summary, old.first_prompt, old.last_prompt, old.messages_text);
-    INSERT INTO sessions_fts(rowid, summary, first_prompt, last_prompt, messages_text)
-    VALUES (new.rowid, new.summary, new.first_prompt, new.last_prompt, new.messages_text);
+    INSERT INTO sessions_fts(sessions_fts, rowid, summary, first_prompt, last_prompt, messages_text, project_path)
+    VALUES ('delete', old.rowid, old.summary, old.first_prompt, old.last_prompt, old.messages_text, old.project_path);
+    INSERT INTO sessions_fts(rowid, summary, first_prompt, last_prompt, messages_text, project_path)
+    VALUES (new.rowid, new.summary, new.first_prompt, new.last_prompt, new.messages_text, new.project_path);
 END;
 """
 

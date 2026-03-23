@@ -156,7 +156,7 @@ def _fts_search(
     sql = f"""
         SELECT
             s.*,
-            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -165,7 +165,7 @@ def _fts_search(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0)
         LIMIT ?
     """
 
@@ -247,7 +247,7 @@ def _fts_search_relaxed(
 
     sql = f"""
         SELECT s.*,
-            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -256,7 +256,7 @@ def _fts_search_relaxed(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0)
         LIMIT ?
     """
 
