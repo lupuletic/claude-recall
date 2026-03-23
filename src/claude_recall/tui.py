@@ -438,6 +438,13 @@ class RecallApp(App):
                 event.prevent_default()
                 return
 
+        # Ctrl+D: AI summary (works from anywhere when a result is selected)
+        if event.key == "ctrl+d":
+            if self._selected_result:
+                self.action_summarize()
+                event.prevent_default()
+                return
+
         if event.key == "down":
             focused = self.focused
             if focused and focused.id == "search-input":
@@ -449,9 +456,7 @@ class RecallApp(App):
         elif event.key == "up":
             list_view = self.query_one("#results", ListView)
             if self.focused == list_view and list_view.index == 0:
-                input_widget = self.query_one("#search-input", Input)
                 input_widget.focus()
-                # Move cursor to end instead of selecting all
                 input_widget.cursor_position = len(input_widget.value)
                 event.prevent_default()
 
@@ -467,8 +472,15 @@ class RecallApp(App):
         """Update preview when a result is highlighted."""
         if event.item and isinstance(event.item, SessionItem):
             self._selected_result = event.item.result
+            # Auto-show preview panel
             preview = self.query_one("#preview", PreviewPanel)
+            if "visible" not in preview.classes:
+                preview.add_class("visible")
             preview.update_preview(event.item.result)
+            # Update status with context-aware hints
+            self.query_one("#status", Label).update(
+                "Enter=Resume  Ctrl+D=AI Summary  Tab=Hide Preview  Esc=Quit"
+            )
 
     @work(exclusive=True, thread=True)
     def _debounced_search(self, query: str) -> None:

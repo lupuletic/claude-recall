@@ -97,11 +97,18 @@ def _search_pipeline(
     # Phase 5: Cross-encoder reranking
     combined = _cross_encoder_rerank(query, combined[:limit * 2])
 
-    # Phase 6: Optional LLM reranking (claude -p) for highest quality
+    # Phase 6: LLM reranking — auto-enabled when claude CLI is available
+    import shutil
+
     from claude_recall.config import load_config
 
     config = load_config()
-    if config.get("search_mode") == "llm":
+    use_llm = config.get("search_mode") == "llm"
+    if not use_llm and config.get("search_mode") in ("hybrid", "reranked"):
+        # Auto-upgrade to LLM reranking if claude is available
+        use_llm = shutil.which("claude") is not None
+
+    if use_llm and combined:
         combined = _llm_rerank(query, combined[:limit])
 
     # Apply message-count boost as tiebreaker after reranking
