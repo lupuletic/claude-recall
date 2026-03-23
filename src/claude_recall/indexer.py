@@ -64,6 +64,13 @@ def build_index(
     # Cache sessions-index.json data per project
     index_cache: dict[str, dict[str, dict]] = {}
 
+    # Pre-build set of session IDs that are parents of subagents
+    parent_ids = {
+        s["parent_session"]
+        for s in discovered
+        if s.get("is_subagent") and s.get("parent_session")
+    }
+
     indexed = 0
     skipped = 0
     errors = 0
@@ -92,8 +99,8 @@ def build_index(
             errors += 1
             continue
 
-        # Skip sessions with no user messages
-        if parsed["message_count"] == 0:
+        # Skip sessions with no user messages — UNLESS they're parents of subagents
+        if parsed["message_count"] == 0 and session_id not in parent_ids:
             skipped += 1
             continue
 

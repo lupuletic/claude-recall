@@ -562,10 +562,14 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
                 r.score = 1.0
 
     # Drop results that are clearly irrelevant compared to the top result
-    # If the top result is strong and the rest are weak, trim the tail
+    # BUT keep results from the same project (they're likely related sessions)
     if len(reranked) >= 2 and reranked[0].score > 0.5:
-        cutoff = reranked[0].score * 0.4  # must be at least 40% of top score
-        reranked = [r for r in reranked if r.score >= cutoff]
+        top_project = reranked[0].session.project_dir
+        cutoff = reranked[0].score * 0.4
+        reranked = [
+            r for r in reranked
+            if r.score >= cutoff or r.session.project_dir == top_project
+        ]
 
     return reranked
 
