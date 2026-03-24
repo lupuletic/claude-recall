@@ -422,11 +422,14 @@ class RecallApp(App):
 
     def compose(self) -> ComposeResult:
         yield Input(
-            placeholder="Search your Claude Code sessions...",
+            placeholder="Search sessions... (try file:auth.py  cmd:npm test  branch:main)",
             value=self.initial_query,
             id="search-input",
         )
-        yield Label("Type to search — Enter to select — Tab for preview — Esc to quit", id="status")
+        yield Label(
+            "Search by text, or use file: cmd: branch: prefixes  |  Ctrl+D=AI Summary  Ctrl+S=Settings",
+            id="status",
+        )
         with Horizontal(id="main"):
             yield ListView(id="results")
             yield PreviewPanel(id="preview")
@@ -445,7 +448,9 @@ class RecallApp(App):
         status = self.query_one("#status", Label)
 
         if not query:
-            status.update("Type to search your Claude Code sessions")
+            status.update(
+                "Type to search  |  Prefixes: file:name  cmd:command  branch:name"
+            )
             self.query_one("#results", ListView).clear()
             self._selected_result = None
             # Clear preview
