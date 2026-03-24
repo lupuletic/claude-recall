@@ -42,9 +42,8 @@ class TestPrepareFtsQuery:
 
     def test_single_keyword(self):
         result = _prepare_fts_query("authentication")
-        # Prefix matching: single term gets OR with prefix variant
+        # Single terms use exact match only (prefix adds noise via stemming)
         assert '"authentication"' in result
-        assert '"authentication"*' in result
 
     def test_single_keyword_no_prefix(self):
         result = _prepare_fts_query("authentication", use_prefix=False)
@@ -493,11 +492,11 @@ class TestApplyDepthBoost:
         )
         return SearchResult(session=s, score=score)
 
-    def test_single_message_no_boost(self):
+    def test_single_message_penalized(self):
         r = self._make_result("a", 1, 1.0)
         _apply_depth_boost([r])
-        # 1 msg → log2(1)=0, boost=1.0
-        assert r.score == pytest.approx(1.0)
+        # 1 msg → log2(1)=0, base boost=1.0, then 0.5x penalty for automated
+        assert r.score == pytest.approx(0.5)
 
     def test_multi_message_gets_boost(self):
         r1 = self._make_result("a", 1, 1.0)

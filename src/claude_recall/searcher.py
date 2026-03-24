@@ -74,23 +74,55 @@ def _search_pipeline(
     fts_fetch = max(limit * 5, 30)
     fts_results = _fts_search(conn, query, fts_fetch, project_filter, after, before, min_messages)
 
-    # Phase 2: If strict FTS found too few, try relaxed FTS (OR)
+    # Phase 2: If strict AND found too few results, try broader searches.
     if len(fts_results) < 3:
+        seen = {r.session.session_id for r in fts_results}
+
+        # Phase 2a: Relaxed FTS (OR) — catches sessions with some query terms.
+        # Run this FIRST because OR results with high BM25 are more reliable
+        # than drop-one-term results.
         relaxed = _fts_search_relaxed(
             conn, query, fts_fetch, project_filter, after, before, min_messages
         )
-        seen = {r.session.session_id for r in fts_results}
         for r in relaxed:
             if r.session.session_id not in seen:
-                r.score *= 0.5  # heavier penalty for OR-only matches
+                r.score *= 0.5  # penalty for OR-only matches
                 fts_results.append(r)
                 seen.add(r.session.session_id)
+
+        # Phase 2b: "Drop one term" queries for 3+ term queries.
+        # This handles cases where the right session has all but one term.
+        # These get a heavier penalty since they may match tangentially.
+        terms = [
+            t for t in query.lower().split()
+            if t not in _STOP_WORDS and len(t) > 1
+        ]
+        if len(terms) >= 3:
+            for drop_idx in range(len(terms)):
+                subset = terms[:drop_idx] + terms[drop_idx + 1:]
+                sub_query = " AND ".join(
+                    f'("{t}" OR "{t}"*)' if len(t) >= 3 else f'"{t}"'
+                    for t in subset
+                )
+                try:
+                    partial = _fts_search_raw(
+                        conn, sub_query, fts_fetch, project_filter, after, before, min_messages
+                    )
+                except Exception:
+                    continue
+                for r in partial:
+                    if r.session.session_id not in seen:
+                        r.score *= 0.45  # heavier penalty — only N-1 terms matched
+                        fts_results.append(r)
+                        seen.add(r.session.session_id)
 
     if not use_semantic:
         # Apply boosts before final normalization
         _apply_depth_boost(fts_results)
         _apply_project_path_boost(query, fts_results)
         _apply_prompt_match_boost(query, fts_results)
+        _apply_literal_match_boost(query, fts_results)
+        _penalize_stem_only_matches(query, fts_results)
         if fts_results:
             max_s = max(r.score for r in fts_results)
             if max_s > 0:
@@ -122,6 +154,8 @@ def _search_pipeline(
     _apply_depth_boost(combined)
     _apply_project_path_boost(query, combined)
     _apply_prompt_match_boost(query, combined)
+    _apply_literal_match_boost(query, combined)
+    _penalize_stem_only_matches(query, combined)
     if combined:
         max_s = max(r.score for r in combined)
         if max_s > 0:
@@ -214,6 +248,73 @@ def _fts_search(
         abs_ranks = [abs(r.fts_rank or 0) for r in results]
         min_abs = min(abs_ranks)  # worst match
         max_abs = max(abs_ranks)  # best match
+        spread = max_abs - min_abs
+        if spread > 0:
+            for r in results:
+                r.score = (abs(r.fts_rank or 0) - min_abs) / spread
+        else:
+            for r in results:
+                r.score = 1.0
+
+    return results
+
+
+def _fts_search_raw(
+    conn: sqlite3.Connection,
+    fts_query: str,
+    limit: int,
+    project_filter: str | None,
+    after: str | None,
+    before: str | None,
+    min_messages: int,
+) -> list[SearchResult]:
+    """FTS search with a raw pre-built FTS5 query string."""
+    where_parts = ["s.is_subagent = 0"]
+    params: list = []
+    if project_filter:
+        where_parts.append("s.project_path LIKE ?")
+        params.append(f"%{project_filter}%")
+    if after:
+        where_parts.append("s.modified >= ?")
+        params.append(after)
+    if before:
+        where_parts.append("s.modified <= ?")
+        params.append(before)
+    if min_messages > 0:
+        where_parts.append("s.message_count >= ?")
+        params.append(min_messages)
+    where_clause = "AND " + " AND ".join(where_parts) if where_parts else ""
+
+    sql = f"""
+        SELECT s.*,
+            bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0) as fts_rank,
+            snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
+            snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
+            snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
+            snippet(sessions_fts, 3, '**', '**', '...', 20) as messages_snippet
+        FROM sessions_fts
+        JOIN sessions s ON s.rowid = sessions_fts.rowid
+        WHERE sessions_fts MATCH ?
+        {where_clause}
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0)
+        LIMIT ?
+    """
+
+    rows = conn.execute(sql, [fts_query, *params, limit]).fetchall()
+
+    results = []
+    for row in rows:
+        session = _row_to_session(row)
+        snippets = _collect_snippets(row)
+        results.append(SearchResult(
+            session=session, score=0.0,
+            fts_rank=row["fts_rank"], snippets=snippets,
+        ))
+
+    if results:
+        abs_ranks = [abs(r.fts_rank or 0) for r in results]
+        min_abs = min(abs_ranks)
+        max_abs = max(abs_ranks)
         spread = max_abs - min_abs
         if spread > 0:
             for r in results:
@@ -498,17 +599,17 @@ def _apply_depth_boost(results: list[SearchResult]) -> None:
     """
     for r in results:
         mc = max(r.session.message_count, 1)
-        # Mild tiebreaker: 2 msgs → 1.05x, 10 msgs → 1.17x, 50 msgs → 1.28x
-        boost = 1.0 + 0.05 * math.log2(mc)
+        # Very mild tiebreaker: 2 msgs → 1.03x, 10 msgs → 1.10x, 50 msgs → 1.17x
+        boost = 1.0 + 0.03 * math.log2(mc)
         # Strong penalty for 1-message sessions — likely automated CI/bots
         if mc == 1:
             boost *= 0.5
-        # Mild boost for project-specific sessions over generic root paths.
-        # Sessions at ~/Projects (no sub-project) are often meta-conversations
-        # spanning multiple topics, less likely to be THE session about X.
+        # Penalize sessions from generic root paths (~/Projects, ~/Downloads).
+        # These are typically meta-conversations spanning multiple topics
+        # and less likely to be THE session about a specific project X.
         path_parts = r.session.project_path.rstrip("/").split("/")
         if len(path_parts) > 0 and path_parts[-1] in ("Projects", "Downloads", "Desktop", "Documents"):
-            boost *= 0.85
+            boost *= 0.5
         r.score *= boost
 
 
@@ -517,7 +618,7 @@ def _apply_project_path_boost(query: str, results: list[SearchResult]) -> None:
 
     When someone searches "trading bot", a project literally called
     "polymarket-copy-trading-bot" is highly likely to be the right match.
-    This gives a strong boost proportional to how many query terms match.
+    Single-term path matches get a mild boost; multi-term matches get more.
     """
     terms = [
         t for t in query.lower().split()
@@ -530,10 +631,14 @@ def _apply_project_path_boost(query: str, results: list[SearchResult]) -> None:
         path = r.session.project_path.lower()
         # Check how many query terms appear in the project path
         matches = sum(1 for t in terms if t in path)
-        if matches > 0:
-            # Proportional boost: 1 term = 1.3x, 2 terms = 1.6x, 3+ = 1.9x
+        if matches >= 2:
+            # Strong boost for multi-term path matches
             boost = 1.0 + 0.3 * min(matches, 3)
             r.score *= boost
+        elif matches == 1 and len(terms) <= 2:
+            # Single-term path match only boosts for short queries
+            # (avoids "saas" in path dominating multi-term queries)
+            r.score *= 1.2
 
 
 def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
@@ -582,6 +687,66 @@ def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
                 r.score *= 1.0 + 0.5 * fraction
 
 
+def _penalize_stem_only_matches(query: str, results: list[SearchResult]) -> None:
+    """Penalize results that match FTS only via porter stemming, not literally.
+
+    When a session matches the FTS query but most query terms don't appear
+    literally in its text, it's likely a false-positive stem match
+    (e.g. "captures" matching "capturing" in an unrelated context).
+    """
+    terms = [
+        t for t in query.lower().split()
+        if t not in _STOP_WORDS and len(t) > 2
+    ]
+    if not terms or len(terms) < 3:
+        return
+
+    for r in results:
+        text = " ".join(filter(None, [
+            r.session.summary,
+            r.session.first_prompt,
+            r.session.messages_text,
+        ])).lower()
+
+        literal_count = sum(1 for t in terms if t in text)
+        missing = len(terms) - literal_count
+
+        # If half or more of the terms are stem-only matches, penalize
+        if missing >= len(terms) / 2:
+            r.score *= 0.5
+
+
+def _apply_literal_match_boost(query: str, results: list[SearchResult]) -> None:
+    """Boost results where query terms appear LITERALLY (not just via stemming).
+
+    FTS5 with porter stemming can produce false-positive matches —
+    e.g. "captures" matching "capturing" in an unrelated context.
+    This boost rewards sessions where query terms appear as literal substrings,
+    ensuring the right session rises above stem-only matches.
+    """
+    terms = [
+        t for t in query.lower().split()
+        if t not in _STOP_WORDS and len(t) > 2
+    ]
+    if not terms or len(terms) < 2:
+        return
+
+    for r in results:
+        # Build combined text from key fields
+        text = " ".join(filter(None, [
+            r.session.summary,
+            r.session.first_prompt,
+            r.session.messages_text,
+        ])).lower()
+
+        # Count how many query terms appear literally
+        literal_count = sum(1 for t in terms if t in text)
+        # Boost proportional to literal match fraction, with strong scaling
+        # 1/4 literal = 1.15x, 2/4 = 1.3x, 3/4 = 1.45x, 4/4 = 1.6x
+        fraction = literal_count / len(terms)
+        r.score *= 1.0 + 0.6 * fraction
+
+
 # Common English stop words that pollute FTS results
 _STOP_WORDS = {
     "a", "an", "the", "is", "it", "in", "on", "at", "to", "for", "of",
@@ -596,6 +761,7 @@ _STOP_WORDS = {
     "session", "sessions", "find", "search", "show", "get", "look",
     "one", "time", "did", "made", "built", "worked", "give", "gave",
     "need", "want", "try", "use", "using", "used", "like", "thing",
+    "setting", "set", "run", "running", "help", "please", "add",
 }
 
 
