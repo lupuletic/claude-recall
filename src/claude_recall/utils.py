@@ -146,13 +146,13 @@ def parse_session_file(file_path: str | Path) -> dict:
     """Parse a session .jsonl file and extract searchable content.
 
     Returns dict with:
-        first_prompt: str | None
-        first_reply: str | None
-        last_prompt: str | None
-        last_reply: str | None
-        messages_text: str  (sampled user messages for FTS)
-        message_count: int  (number of user messages)
+        first_prompt, first_reply, last_prompt, last_reply: str | None
+        messages_text: str  (sampled user+assistant messages for FTS)
+        message_count: int
         chunks: list[str]  (conversation chunks for embedding)
+        files_modified: list[str]  (file paths edited/written)
+        commands_run: list[str]  (key bash commands)
+        git_branch_detected: str | None
     """
     first_prompt = None
     first_reply = None
@@ -160,6 +160,12 @@ def parse_session_file(file_path: str | Path) -> dict:
     last_reply = None
     user_messages: list[str] = []
     assistant_texts: list[str] = []
+    files_modified: set[str] = set()
+    commands_run: list[str] = []
+    git_branch_detected: str | None = None
+
+    # Commands to skip (low signal)
+    _SKIP_CMDS = {"cd", "ls", "cat", "echo", "pwd", "head", "tail", "wc", "true", "false"}
 
     try:
         with open(file_path) as f:
@@ -188,7 +194,8 @@ def parse_session_file(file_path: str | Path) -> dict:
 
                 elif msg_type == "assistant":
                     msg = obj.get("message", {})
-                    text = extract_text_from_content(msg.get("content", []))
+                    content = msg.get("content", [])
+                    text = extract_text_from_content(content)
                     if text:
                         assistant_texts.append(text)
                         cleaned = clean_display_text(text)
@@ -196,6 +203,40 @@ def parse_session_file(file_path: str | Path) -> dict:
                             if first_reply is None:
                                 first_reply = cleaned[:MAX_FIRST_REPLY]
                             last_reply = cleaned[:MAX_FIRST_REPLY]
+
+                    # Extract tool calls (files modified, commands run)
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                                continue
+                            tool = block.get("name", "")
+                            inp = block.get("input", {})
+
+                            if tool in ("Edit", "Write", "NotebookEdit"):
+                                fp = inp.get("file_path", "")
+                                if fp:
+                                    # Keep just filename or last 2 path parts
+                                    parts = fp.split("/")
+                                    short = "/".join(parts[-2:]) if len(parts) > 1 else fp
+                                    files_modified.add(short)
+
+                            elif tool == "Bash":
+                                cmd = inp.get("command", "").strip()
+                                if cmd:
+                                    # Extract first word (the actual command)
+                                    first_word = cmd.split()[0] if cmd.split() else ""
+                                    if first_word and first_word not in _SKIP_CMDS:
+                                        commands_run.append(cmd[:80])
+                                    # Detect git branch
+                                    if not git_branch_detected:
+                                        for pattern in ["git checkout ", "git switch "]:
+                                            if pattern in cmd:
+                                                branch = cmd.split(pattern)[-1].split()[0]
+                                                git_branch_detected = branch
+
+                # Detect git branch from session metadata
+                if not git_branch_detected and obj.get("gitBranch"):
+                    git_branch_detected = obj["gitBranch"]
 
     except OSError:
         pass
@@ -209,6 +250,16 @@ def parse_session_file(file_path: str | Path) -> dict:
     # Auto-generate summary from first prompt + reply
     summary = generate_summary(first_prompt, first_reply)
 
+    # Deduplicate and limit commands
+    seen_cmds: set[str] = set()
+    unique_cmds: list[str] = []
+    for cmd in commands_run:
+        key = cmd.split()[0] if cmd.split() else cmd
+        if key not in seen_cmds:
+            seen_cmds.add(key)
+            unique_cmds.append(cmd)
+    commands_run = unique_cmds[:10]
+
     return {
         "first_prompt": first_prompt,
         "first_reply": first_reply,
@@ -218,6 +269,9 @@ def parse_session_file(file_path: str | Path) -> dict:
         "message_count": len(user_messages),
         "chunks": chunks,
         "summary": summary,
+        "files_modified": sorted(files_modified)[:15],
+        "commands_run": commands_run,
+        "git_branch_detected": git_branch_detected,
     }
 
 

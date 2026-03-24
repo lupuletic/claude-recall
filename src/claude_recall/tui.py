@@ -98,37 +98,62 @@ class PreviewPanel(Static):
             self.update("[dim]Select a session to preview[/dim]")
             return
 
+        import json as _json
+
         s = result.session
         lines = []
 
-        # Header
+        # Header — title + project + branch
         title = _session_title(s, 120)
-        lines.append(f"[bold underline]{title}[/bold underline]\n")
-
-        # Metadata
-        lines.append(f"[bold]Project:[/bold]  {result.display_project}")
+        lines.append(f"[bold]{title}[/bold]")
         if s.git_branch:
-            lines.append(f"[bold]Branch:[/bold]   {s.git_branch}")
-        if s.modified:
-            lines.append(f"[bold]Date:[/bold]     {format_date(s.modified)}")
-        lines.append(f"[bold]Messages:[/bold] {s.message_count}")
-        lines.append(f"[bold]Size:[/bold]     {format_size(s.file_size)}")
-        lines.append(f"[bold]Score:[/bold]    {result.score:.0%}")
+            lines.append(f"[cyan]{s.git_branch}[/cyan]")
+        lines.append(f"[dim]{result.display_project}[/dim]")
+        lines.append(
+            f"[dim]{format_date(s.modified)} · {s.message_count} msgs · "
+            f"{format_size(s.file_size)} · {result.score:.0%} match[/dim]"
+        )
 
-        # First prompt
+        # Files modified — the "fingerprint" of the session
+        files = []
+        try:
+            files = _json.loads(s.files_modified) if s.files_modified else []
+        except (ValueError, TypeError):
+            pass
+        if files:
+            lines.append(f"\n[bold]Files modified:[/bold]")
+            for f in files[:8]:
+                lines.append(f"  [green]{f}[/green]")
+            if len(files) > 8:
+                lines.append(f"  [dim]… {len(files) - 8} more[/dim]")
+
+        # Key commands run
+        cmds = []
+        try:
+            cmds = _json.loads(s.commands_run) if s.commands_run else []
+        except (ValueError, TypeError):
+            pass
+        if cmds:
+            lines.append(f"\n[bold]Commands:[/bold]")
+            for cmd in cmds[:5]:
+                lines.append(f"  [yellow]$ {cmd}[/yellow]")
+
+        # Started with (truncated)
         if s.first_prompt:
             fp = clean_display_text(s.first_prompt) or ""
             if fp:
-                lines.append(f"\n[bold]Started with:[/bold]\n{fp[:400]}")
+                lines.append(f"\n[bold]Started with:[/bold]")
+                lines.append(f"[dim]{fp[:250]}[/dim]")
 
-        # Last activity
+        # Left off at
         if s.last_prompt and s.last_prompt != s.first_prompt:
             lp = clean_display_text(s.last_prompt) or ""
             if lp:
-                lines.append(f"\n[bold]Left off at:[/bold]\n{lp[:400]}")
+                lines.append(f"\n[bold]Left off at:[/bold]")
+                lines.append(f"[dim]{lp[:200]}[/dim]")
 
-        lines.append(f"\n[bold green]↵ Enter to resume this session[/bold green]")
-        lines.append(f"[dim]ID: {s.session_id}[/dim]")
+        lines.append(f"\n[bold green]↵ Enter to resume[/bold green]  [dim]Ctrl+D for AI summary[/dim]")
+        lines.append(f"[dim]{s.session_id}[/dim]")
 
         self.update("\n".join(lines))
 

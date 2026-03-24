@@ -110,6 +110,8 @@ def build_index(
         # Use sessions-index summary if available, otherwise auto-generate
         summary = idx_meta.get("summary") or parsed.get("summary")
 
+        import json as _json
+
         session = Session(
             session_id=session_id,
             project_path=project_path,
@@ -121,7 +123,9 @@ def build_index(
             last_prompt=parsed["last_prompt"],
             last_reply=parsed["last_reply"],
             messages_text=parsed["messages_text"],
-            git_branch=idx_meta.get("gitBranch"),
+            git_branch=idx_meta.get("gitBranch") or parsed.get("git_branch_detected"),
+            files_modified=_json.dumps(parsed.get("files_modified", [])),
+            commands_run=_json.dumps(parsed.get("commands_run", [])),
             message_count=parsed["message_count"],
             file_size=session_info["file_size"],
             created=idx_meta.get("created") or _mtime_to_iso(file_mtime),

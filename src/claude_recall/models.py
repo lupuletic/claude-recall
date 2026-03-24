@@ -27,6 +27,9 @@ class Session:
     mtime: float = 0.0
     is_subagent: bool = False
     parent_session: str | None = None
+    files_modified: str | None = None  # JSON list of file paths
+    commands_run: str | None = None  # JSON list of commands
+    git_branch_detected: str | None = None
 
 
 @dataclass
