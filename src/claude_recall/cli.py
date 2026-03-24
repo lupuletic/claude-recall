@@ -17,6 +17,14 @@ HOOKS_MARKER = Path.home() / ".claude-recall" / ".hooks-installed"
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        _run(argv)
+    except KeyboardInterrupt:
+        print("", file=sys.stderr)  # clean newline
+        sys.exit(0)
+
+
+def _run(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="claude-recall",
         description="Semantic search across Claude Code sessions.",

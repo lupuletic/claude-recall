@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     modified TEXT,
     mtime REAL DEFAULT 0,
     is_subagent INTEGER DEFAULT 0,
-    parent_session TEXT
+    parent_session TEXT,
+    files_modified TEXT,
+    commands_run TEXT,
+    git_branch_detected TEXT
 );
 
 -- Chunks table for multi-embed semantic search
@@ -129,8 +132,9 @@ def upsert_session(conn: sqlite3.Connection, session: Session) -> None:
            (session_id, project_path, project_dir, file_path,
             summary, first_prompt, first_reply, last_prompt, last_reply,
             messages_text, git_branch, message_count, file_size,
-            created, modified, mtime, is_subagent, parent_session)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created, modified, mtime, is_subagent, parent_session,
+            files_modified, commands_run, git_branch_detected)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             session.session_id,
             session.project_path,
@@ -150,6 +154,9 @@ def upsert_session(conn: sqlite3.Connection, session: Session) -> None:
             session.mtime,
             int(session.is_subagent),
             session.parent_session,
+            session.files_modified,
+            session.commands_run,
+            session.git_branch_detected,
         ),
     )
 

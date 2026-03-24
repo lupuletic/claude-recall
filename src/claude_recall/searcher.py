@@ -695,6 +695,9 @@ def _row_to_session(row: sqlite3.Row) -> Session:
         mtime=row["mtime"],
         is_subagent=bool(row["is_subagent"]),
         parent_session=row["parent_session"],
+        files_modified=row["files_modified"] if "files_modified" in row.keys() else None,
+        commands_run=row["commands_run"] if "commands_run" in row.keys() else None,
+        git_branch_detected=row["git_branch_detected"] if "git_branch_detected" in row.keys() else None,
     )
 
 
