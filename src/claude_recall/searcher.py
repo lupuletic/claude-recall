@@ -69,12 +69,15 @@ def _search_pipeline(
             use_semantic = False
 
     # Phase 1: Strict FTS (AND — all meaningful terms must appear)
-    fts_results = _fts_search(conn, query, limit * 3, project_filter, after, before, min_messages)
+    # Fetch more candidates to survive depth-boost reranking (1-message
+    # automated sessions often dominate BM25 and get penalized later)
+    fts_fetch = max(limit * 5, 30)
+    fts_results = _fts_search(conn, query, fts_fetch, project_filter, after, before, min_messages)
 
     # Phase 2: If strict FTS found too few, try relaxed FTS (OR)
     if len(fts_results) < 3:
         relaxed = _fts_search_relaxed(
-            conn, query, limit * 3, project_filter, after, before, min_messages
+            conn, query, fts_fetch, project_filter, after, before, min_messages
         )
         seen = {r.session.session_id for r in fts_results}
         for r in relaxed:
@@ -84,13 +87,16 @@ def _search_pipeline(
                 seen.add(r.session.session_id)
 
     if not use_semantic:
-        # Apply message-count boost before final normalization
+        # Apply boosts before final normalization
         _apply_depth_boost(fts_results)
+        _apply_project_path_boost(query, fts_results)
+        _apply_prompt_match_boost(query, fts_results)
         if fts_results:
             max_s = max(r.score for r in fts_results)
             if max_s > 0:
                 for r in fts_results:
                     r.score /= max_s
+        fts_results.sort(key=lambda r: r.score, reverse=True)
         return fts_results[:limit]
 
     # Phase 3: Semantic search
@@ -112,8 +118,10 @@ def _search_pipeline(
     if config.get("search_mode") == "llm" and combined:
         combined = _llm_rerank(query, combined[:limit])
 
-    # Apply message-count boost as tiebreaker after reranking
+    # Apply boosts as tiebreaker after reranking
     _apply_depth_boost(combined)
+    _apply_project_path_boost(query, combined)
+    _apply_prompt_match_boost(query, combined)
     if combined:
         max_s = max(r.score for r in combined)
         if max_s > 0:
@@ -161,10 +169,11 @@ def _fts_search(
     # Escape FTS5 special characters in query for safe matching
     fts_query = _prepare_fts_query(query)
 
+    # BM25 column weights: summary=5, first_prompt=3, last_prompt=3, messages_text=2, project_path=4
     sql = f"""
         SELECT
             s.*,
-            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -173,7 +182,7 @@ def _fts_search(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0)
         LIMIT ?
     """
 
@@ -255,7 +264,7 @@ def _fts_search_relaxed(
 
     sql = f"""
         SELECT s.*,
-            bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0) as fts_rank,
+            bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0) as fts_rank,
             snippet(sessions_fts, 0, '**', '**', '...', 20) as summary_snippet,
             snippet(sessions_fts, 1, '**', '**', '...', 20) as prompt_snippet,
             snippet(sessions_fts, 2, '**', '**', '...', 20) as last_prompt_snippet,
@@ -264,7 +273,7 @@ def _fts_search_relaxed(
         JOIN sessions s ON s.rowid = sessions_fts.rowid
         WHERE sessions_fts MATCH ?
         {where_clause}
-        ORDER BY bm25(sessions_fts, 5.0, 3.0, 2.0, 2.0, 4.0)
+        ORDER BY bm25(sessions_fts, 5.0, 3.0, 3.0, 2.0, 4.0)
         LIMIT ?
     """
 
@@ -473,16 +482,65 @@ def _reciprocal_rank_fusion(
 
 
 def _apply_depth_boost(results: list[SearchResult]) -> None:
-    """Mildly boost scores for sessions with more messages.
+    """Boost scores for sessions with more messages.
 
     Uses log2(message_count) as a multiplier:
-      1 msg → 1.0x, 5 msgs → ~1.16x, 10 msgs → ~1.22x, 50 msgs → ~1.35x
-    This acts as a tiebreaker favoring substantive conversations.
+      1 msg → 1.0x, 5 msgs → ~1.23x, 10 msgs → ~1.33x, 50 msgs → ~1.56x
+    This penalizes single-message automated sessions (CI/issue bots)
+    and rewards substantive human conversations.
     """
     for r in results:
         mc = max(r.session.message_count, 1)
         boost = 1.0 + 0.1 * math.log2(mc)
+        # Extra penalty for 1-message sessions — likely automated
+        if mc == 1:
+            boost *= 0.5
         r.score *= boost
+
+
+def _apply_project_path_boost(query: str, results: list[SearchResult]) -> None:
+    """Boost results where query terms appear in the project path/name.
+
+    When someone searches "trading bot", a project literally called
+    "polymarket-copy-trading-bot" is highly likely to be the right match.
+    This gives a strong boost proportional to how many query terms match.
+    """
+    terms = [
+        t for t in query.lower().split()
+        if t not in _STOP_WORDS and len(t) > 2
+    ]
+    if not terms:
+        return
+
+    for r in results:
+        path = r.session.project_path.lower()
+        # Check how many query terms appear in the project path
+        matches = sum(1 for t in terms if t in path)
+        if matches > 0:
+            # Proportional boost: 1 term = 1.3x, 2 terms = 1.6x, 3+ = 1.9x
+            boost = 1.0 + 0.3 * min(matches, 3)
+            r.score *= boost
+
+
+def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
+    """Boost results where the query closely matches first/last prompt.
+
+    This helps "find my conversation" queries where the user remembers
+    exactly what they typed, e.g. "give me the final version".
+    """
+    query_lower = query.lower().strip()
+    if len(query_lower) < 5:
+        return
+
+    for r in results:
+        # Check if query is a near-exact substring of first or last prompt
+        first_prompt = (r.session.first_prompt or "").lower()
+        last_prompt = (r.session.last_prompt or "").lower()
+
+        if query_lower in last_prompt or last_prompt in query_lower:
+            r.score *= 2.0
+        elif query_lower in first_prompt or first_prompt in query_lower:
+            r.score *= 1.8
 
 
 # Common English stop words that pollute FTS results
@@ -497,7 +555,8 @@ _STOP_WORDS = {
     "if", "then", "so", "just", "also", "very", "too",
     "about", "up", "out", "no", "yes", "all", "some", "any",
     "session", "sessions", "find", "search", "show", "get", "look",
-    "one", "time", "did", "made", "built", "worked",
+    "one", "time", "did", "made", "built", "worked", "give", "gave",
+    "need", "want", "try", "use", "using", "used", "like", "thing",
 }
 
 

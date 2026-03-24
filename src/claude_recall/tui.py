@@ -528,7 +528,7 @@ class RecallApp(App):
 
     @on(ListView.Highlighted, "#results")
     def on_result_highlighted(self, event: ListView.Highlighted) -> None:
-        """Update preview when a result is highlighted."""
+        """Update preview when a result is highlighted, then auto-load AI summary."""
         if event.item and isinstance(event.item, SessionItem):
             self._selected_result = event.item.result
             # Auto-show preview panel
@@ -536,6 +536,8 @@ class RecallApp(App):
             if "visible" not in preview.classes:
                 preview.add_class("visible")
             preview.update_preview(event.item.result)
+            # Auto-load AI summary in background
+            self._auto_summarize(event.item.result)
             # Update status with context-aware hints
             self.query_one("#status", Label).update(
                 "Enter=Resume  Ctrl+D=AI Summary  Ctrl+P=Toggle Preview  Esc=Quit"
@@ -595,12 +597,73 @@ class RecallApp(App):
         preview = self.query_one("#preview", PreviewPanel)
         preview.toggle_class("visible")
 
+    @work(thread=True, group="auto-summary")
+    def _auto_summarize(self, result: SearchResult) -> None:
+        """Auto-load AI summary in background when a result is highlighted."""
+        import shutil
+        import subprocess
+        import time
+
+        # Small delay — don't fire if user is scrolling fast
+        time.sleep(1.0)
+
+        # Check if user moved to a different result
+        if self._selected_result != result:
+            return
+
+        s = result.session
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            return
+
+        # Show spinner in preview
+        self.call_from_thread(self._append_to_preview, "\n[bold]Loading AI summary...[/bold] ⏳")
+
+        prompt = (
+            f"Summarize this Claude Code session in 2-3 concise bullet points. "
+            f"What was the goal? What was accomplished?\n\n"
+            f"Project: {result.display_project}\n"
+            f"First message: {(s.first_prompt or '')[:300]}\n"
+            f"Last message: {(s.last_prompt or '')[:300]}\n"
+            f"Messages: {s.message_count}\n"
+        )
+
+        try:
+            proc = subprocess.run(
+                [claude_bin, "-p", "--model", "haiku", "--no-session-persistence"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            summary = proc.stdout.strip() if proc.returncode == 0 else None
+        except Exception:
+            summary = None
+
+        # Only update if user is still on the same result
+        if self._selected_result == result and summary:
+            self.call_from_thread(
+                self._append_to_preview,
+                f"\n[bold]AI Summary:[/bold]\n[italic]{summary}[/italic]",
+            )
+        elif self._selected_result == result:
+            self.call_from_thread(
+                self._append_to_preview,
+                "\n[dim]AI summary unavailable[/dim]",
+            )
+
+    def _append_to_preview(self, text: str) -> None:
+        """Append text to the current preview content."""
+        preview = self.query_one("#preview", PreviewPanel)
+        current = preview.renderable
+        if isinstance(current, str):
+            preview.update(current + text)
+
     def action_summarize(self) -> None:
-        """Generate an AI summary of the selected session using claude -p."""
+        """Manually trigger AI summary of the selected session."""
         if not self._selected_result:
             return
         preview = self.query_one("#preview", PreviewPanel)
-        preview.toggle_class("visible")
         if "visible" not in preview.classes:
             preview.add_class("visible")
         preview.update("[bold]Generating AI summary...[/bold]")
