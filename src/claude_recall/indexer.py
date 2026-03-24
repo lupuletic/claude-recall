@@ -9,13 +9,17 @@ from pathlib import Path
 from claude_recall import has_semantic
 from claude_recall.db import (
     DB_PATH,
+    build_session_chains,
     delete_session,
     get_all_session_ids,
     get_connection,
     get_session_mtime,
     setup_vec_table,
     upsert_chunks,
+    upsert_graph_edges,
     upsert_session,
+    upsert_session_commands,
+    upsert_session_files,
 )
 from claude_recall.models import Session
 from claude_recall.utils import (
@@ -143,6 +147,34 @@ def build_index(
 
         upsert_session(conn, session)
         upsert_chunks(conn, session_id, parsed["chunks"])
+
+        # Build graph edges and normalized tables from tool calls
+        graph_edges = []
+        file_records = []
+
+        for file_path in parsed.get("files_modified", []):
+            file_name = file_path.split("/")[-1]
+            file_records.append({"path": file_path, "name": file_name, "action": "edit"})
+            graph_edges.append({
+                "src_type": "session", "src_name": session_id,
+                "dst_type": "file", "dst_name": file_name,
+                "rel": "edited",
+            })
+
+        cmd_records = []
+        for cmd in parsed.get("commands_run", []):
+            cmd_name = cmd.split()[0] if cmd.split() else cmd
+            cmd_records.append({"command": cmd[:80], "command_name": cmd_name})
+            graph_edges.append({
+                "src_type": "session", "src_name": session_id,
+                "dst_type": "command", "dst_name": cmd_name,
+                "rel": "ran",
+            })
+
+        upsert_session_files(conn, session_id, file_records)
+        upsert_session_commands(conn, session_id, cmd_records)
+        upsert_graph_edges(conn, session_id, graph_edges)
+
         indexed += 1
 
         # Commit in batches so a kill doesn't lose everything
@@ -162,6 +194,13 @@ def build_index(
     # still finds the parent session
     if indexed > 0:
         _enrich_parents_with_subagent_content(conn, verbose)
+
+    # Build session chains (group related sessions by project/branch/time)
+    if indexed > 0:
+        try:
+            build_session_chains(conn)
+        except Exception:
+            pass  # Non-critical — don't fail indexing
 
     # Generate embeddings if semantic is available (unless deferred)
     embeddings_generated = 0

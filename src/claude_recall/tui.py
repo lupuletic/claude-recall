@@ -152,6 +152,26 @@ class PreviewPanel(Static):
                 lines.append(f"\n[bold]Left off at:[/bold]")
                 lines.append(f"[dim]{lp[:200]}[/dim]")
 
+        # Related sessions (via shared files in knowledge graph)
+        try:
+            from claude_recall.db import DB_PATH, get_connection, get_related_sessions
+
+            conn = get_connection(DB_PATH)
+            related = get_related_sessions(conn, s.session_id, limit=3)
+            conn.close()
+            if related:
+                lines.append(f"\n[bold]Related sessions:[/bold]")
+                for rel in related:
+                    rel_summary = rel["summary"] or "Untitled"
+                    if len(rel_summary) > 60:
+                        rel_summary = rel_summary[:60] + "..."
+                    shared = rel["shared_files"]
+                    lines.append(
+                        f"  [cyan]{rel_summary}[/cyan] [dim]({shared} shared file{'s' if shared != 1 else ''})[/dim]"
+                    )
+        except Exception:
+            pass  # Non-critical — graph tables may not exist yet
+
         lines.append(f"\n[bold green]↵ Enter to resume[/bold green]  [dim]Ctrl+D for AI summary[/dim]")
         lines.append(f"[dim]{s.session_id}[/dim]")
 

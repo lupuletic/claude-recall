@@ -10,7 +10,7 @@ from claude_recall.models import Session
 DB_DIR = Path.home() / ".claude-recall"
 DB_PATH = DB_DIR / "index.db"
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -51,6 +51,49 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
+
+-- Normalized file edits (searchable by exact file path)
+CREATE TABLE IF NOT EXISTS session_files (
+    session_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'edit',
+    PRIMARY KEY (session_id, file_path, action)
+);
+CREATE INDEX IF NOT EXISTS idx_sf_name ON session_files(file_name);
+CREATE INDEX IF NOT EXISTS idx_sf_path ON session_files(file_path);
+
+-- Normalized commands
+CREATE TABLE IF NOT EXISTS session_commands (
+    session_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    command_name TEXT NOT NULL,
+    PRIMARY KEY (session_id, command)
+);
+CREATE INDEX IF NOT EXISTS idx_sc_name ON session_commands(command_name);
+
+-- Knowledge graph edges
+CREATE TABLE IF NOT EXISTS graph_edges (
+    source_type TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    relationship TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    weight REAL DEFAULT 1.0
+);
+CREATE INDEX IF NOT EXISTS idx_ge_source ON graph_edges(source_type, source_name);
+CREATE INDEX IF NOT EXISTS idx_ge_target ON graph_edges(target_type, target_name);
+CREATE INDEX IF NOT EXISTS idx_ge_session ON graph_edges(session_id);
+
+-- Session chains (related sessions in same project)
+CREATE TABLE IF NOT EXISTS session_chains (
+    session_id TEXT NOT NULL,
+    chain_id TEXT NOT NULL,
+    chain_order INTEGER NOT NULL,
+    PRIMARY KEY (session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chain ON session_chains(chain_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     summary,
@@ -180,6 +223,98 @@ def upsert_chunks(conn: sqlite3.Connection, session_id: str, chunks: list[str]) 
         "INSERT INTO chunks (session_id, chunk_index, chunk_text) VALUES (?, ?, ?)",
         [(session_id, i, text) for i, text in enumerate(chunks)],
     )
+
+
+def upsert_session_files(conn: sqlite3.Connection, session_id: str, files: list[dict]) -> None:
+    """Store normalized file edits. files = [{"path": "...", "name": "...", "action": "edit"}]"""
+    conn.execute("DELETE FROM session_files WHERE session_id = ?", (session_id,))
+    if files:
+        conn.executemany(
+            "INSERT OR IGNORE INTO session_files (session_id, file_path, file_name, action) VALUES (?, ?, ?, ?)",
+            [(session_id, f["path"], f["name"], f["action"]) for f in files],
+        )
+
+
+def upsert_session_commands(conn: sqlite3.Connection, session_id: str, commands: list[dict]) -> None:
+    """Store normalized commands. commands = [{"command": "...", "command_name": "..."}]"""
+    conn.execute("DELETE FROM session_commands WHERE session_id = ?", (session_id,))
+    if commands:
+        conn.executemany(
+            "INSERT OR IGNORE INTO session_commands (session_id, command, command_name) VALUES (?, ?, ?)",
+            [(session_id, c["command"], c["command_name"]) for c in commands],
+        )
+
+
+def upsert_graph_edges(conn: sqlite3.Connection, session_id: str, edges: list[dict]) -> None:
+    """Store knowledge graph edges."""
+    conn.execute("DELETE FROM graph_edges WHERE session_id = ?", (session_id,))
+    if edges:
+        conn.executemany(
+            "INSERT INTO graph_edges (source_type, source_name, target_type, target_name, relationship, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+            [(e["src_type"], e["src_name"], e["dst_type"], e["dst_name"], e["rel"], session_id) for e in edges],
+        )
+
+
+def build_session_chains(conn: sqlite3.Connection) -> None:
+    """Link sessions in the same project + branch within a 4-hour window."""
+    conn.execute("DELETE FROM session_chains")
+    rows = conn.execute("""
+        SELECT session_id, project_dir, git_branch, created
+        FROM sessions WHERE is_subagent = 0
+        ORDER BY project_dir, git_branch, created
+    """).fetchall()
+
+    chain_id = None
+    chain_order = 0
+    prev = None
+
+    for row in rows:
+        key = (row["project_dir"], row["git_branch"] or "")
+        start_new_chain = True
+
+        if prev and prev["key"] == key and prev["created"] and row["created"]:
+            # Check time gap — within 4 hours = same chain
+            try:
+                from datetime import datetime
+
+                prev_dt = datetime.fromisoformat(prev["created"].replace("Z", "+00:00"))
+                curr_dt = datetime.fromisoformat(row["created"].replace("Z", "+00:00"))
+                gap_hours = abs((curr_dt - prev_dt).total_seconds()) / 3600
+                if gap_hours <= 4:
+                    start_new_chain = False
+                    chain_order += 1
+            except (ValueError, TypeError):
+                pass
+
+        if start_new_chain:
+            chain_id = row["session_id"]  # first session is the chain ID
+            chain_order = 0
+
+        conn.execute(
+            "INSERT OR REPLACE INTO session_chains (session_id, chain_id, chain_order) VALUES (?, ?, ?)",
+            (row["session_id"], chain_id, chain_order),
+        )
+        prev = {"key": key, "created": row["created"]}
+
+    conn.commit()
+
+
+def get_related_sessions(conn: sqlite3.Connection, session_id: str, limit: int = 5) -> list:
+    """Find sessions related to this one via shared files."""
+    rows = conn.execute("""
+        SELECT s.session_id, s.project_path, s.summary, s.message_count, s.modified,
+               COUNT(DISTINCT ge2.target_name) as shared_files
+        FROM graph_edges ge1
+        JOIN graph_edges ge2 ON ge1.target_name = ge2.target_name
+            AND ge1.target_type = ge2.target_type
+            AND ge1.session_id != ge2.session_id
+        JOIN sessions s ON s.session_id = ge2.session_id AND s.is_subagent = 0
+        WHERE ge1.session_id = ? AND ge1.relationship = 'edited'
+        GROUP BY s.session_id
+        ORDER BY shared_files DESC
+        LIMIT ?
+    """, (session_id, limit)).fetchall()
+    return rows
 
 
 def get_session_mtime(conn: sqlite3.Connection, session_id: str) -> float | None:

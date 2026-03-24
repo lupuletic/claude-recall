@@ -7,11 +7,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_recall.db import get_connection, upsert_chunks, upsert_session
+from claude_recall.db import (
+    get_connection,
+    upsert_chunks,
+    upsert_graph_edges,
+    upsert_session,
+    upsert_session_commands,
+    upsert_session_files,
+)
 from claude_recall.models import SearchResult, Session
 from claude_recall.searcher import (
     _apply_depth_boost,
+    _branch_search,
+    _command_search,
     _cross_encoder_rerank,
+    _file_search,
     _fts_search,
     _prepare_fts_query,
     _reciprocal_rank_fusion,
@@ -593,3 +603,173 @@ class TestSearchWithSummary:
         assert len(results) >= 1
         ids = [r.session.session_id for r in results]
         assert "sum2" in ids
+
+
+# ===========================================================================
+# Structured search: file:, cmd:, branch:
+# ===========================================================================
+
+class TestStructuredSearch:
+    @pytest.fixture
+    def graph_db(self, db_path: Path):
+        """Create a DB with sessions, files, commands for structured search."""
+        conn = get_connection(db_path)
+
+        s1 = Session(
+            session_id="gs1",
+            project_path="/Users/test/myapp",
+            project_dir="-Users-test-myapp",
+            file_path="/tmp/gs1.jsonl",
+            summary="Auth middleware work",
+            first_prompt="Debug auth",
+            messages_text="debug auth middleware",
+            git_branch="fix/auth",
+            git_branch_detected="fix/auth",
+            message_count=5,
+            file_size=1024,
+            created="2025-01-15T10:00:00Z",
+            modified="2025-01-15T11:00:00Z",
+            mtime=1736935800.0,
+            is_subagent=False,
+        )
+        s2 = Session(
+            session_id="gs2",
+            project_path="/Users/test/webapp",
+            project_dir="-Users-test-webapp",
+            file_path="/tmp/gs2.jsonl",
+            summary="React routing setup",
+            first_prompt="Set up routes",
+            messages_text="react router setup",
+            git_branch="feature/routing",
+            git_branch_detected="feature/routing",
+            message_count=8,
+            file_size=2048,
+            created="2025-02-01T08:00:00Z",
+            modified="2025-02-01T10:00:00Z",
+            mtime=1738396800.0,
+            is_subagent=False,
+        )
+        upsert_session(conn, s1)
+        upsert_session(conn, s2)
+
+        # Files
+        upsert_session_files(conn, "gs1", [
+            {"path": "src/auth.py", "name": "auth.py", "action": "edit"},
+            {"path": "tests/test_auth.py", "name": "test_auth.py", "action": "edit"},
+        ])
+        upsert_session_files(conn, "gs2", [
+            {"path": "src/router.tsx", "name": "router.tsx", "action": "edit"},
+        ])
+
+        # Commands
+        upsert_session_commands(conn, "gs1", [
+            {"command": "pytest tests/", "command_name": "pytest"},
+            {"command": "git diff", "command_name": "git"},
+        ])
+        upsert_session_commands(conn, "gs2", [
+            {"command": "npm test", "command_name": "npm"},
+        ])
+
+        # Graph edges
+        upsert_graph_edges(conn, "gs1", [
+            {"src_type": "session", "src_name": "gs1",
+             "dst_type": "file", "dst_name": "auth.py", "rel": "edited"},
+            {"src_type": "session", "src_name": "gs1",
+             "dst_type": "file", "dst_name": "test_auth.py", "rel": "edited"},
+        ])
+        upsert_graph_edges(conn, "gs2", [
+            {"src_type": "session", "src_name": "gs2",
+             "dst_type": "file", "dst_name": "router.tsx", "rel": "edited"},
+        ])
+
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_file_search_by_name(self, graph_db):
+        """file: prefix should search by file name."""
+        results = search("file:auth.py", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs1"
+
+    def test_file_search_by_path(self, graph_db):
+        """file: prefix should also match partial paths."""
+        results = search("file:src/auth", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        ids = [r.session.session_id for r in results]
+        assert "gs1" in ids
+
+    def test_file_search_no_results(self, graph_db):
+        """file: prefix with no matching file should return empty."""
+        results = search("file:nonexistent.py", db_path=graph_db, semantic=False)
+        assert results == []
+
+    def test_file_search_snippets(self, graph_db):
+        """file: results should have file path in snippets."""
+        results = search("file:auth.py", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert any("auth.py" in s for s in results[0].snippets)
+
+    def test_command_search(self, graph_db):
+        """cmd: prefix should search by command name."""
+        results = search("cmd:pytest", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs1"
+
+    def test_command_search_full(self, graph_db):
+        """cmd: prefix should also match the full command string."""
+        results = search("cmd:npm test", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs2"
+
+    def test_branch_search(self, graph_db):
+        """branch: prefix should search by git branch."""
+        results = search("branch:fix/auth", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs1"
+
+    def test_branch_search_partial(self, graph_db):
+        """branch: prefix should match partial branch names."""
+        results = search("branch:routing", db_path=graph_db, semantic=False)
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs2"
+
+    def test_branch_search_no_results(self, graph_db):
+        """branch: prefix with no matching branch should return empty."""
+        results = search("branch:nonexistent", db_path=graph_db, semantic=False)
+        assert results == []
+
+    def test_file_search_with_project_filter(self, graph_db):
+        """file: search should respect project filter."""
+        results = search(
+            "file:auth.py",
+            db_path=graph_db,
+            semantic=False,
+            project_filter="webapp",
+        )
+        # auth.py only exists in myapp, not webapp
+        assert results == []
+
+    def test_file_search_direct(self, graph_db):
+        """_file_search function should work directly."""
+        conn = get_connection(graph_db)
+        results = _file_search(conn, "router.tsx", 10, None)
+        conn.close()
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs2"
+
+    def test_command_search_direct(self, graph_db):
+        """_command_search function should work directly."""
+        conn = get_connection(graph_db)
+        results = _command_search(conn, "git", 10, None)
+        conn.close()
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs1"
+
+    def test_branch_search_direct(self, graph_db):
+        """_branch_search function should work directly."""
+        conn = get_connection(graph_db)
+        results = _branch_search(conn, "feature", 10, None)
+        conn.close()
+        assert len(results) >= 1
+        assert results[0].session.session_id == "gs2"

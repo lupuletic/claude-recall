@@ -8,13 +8,18 @@ from pathlib import Path
 import pytest
 
 from claude_recall.db import (
+    build_session_chains,
     delete_session,
     get_all_session_ids,
     get_connection,
+    get_related_sessions,
     get_session_mtime,
     get_stats,
     upsert_chunks,
+    upsert_graph_edges,
     upsert_session,
+    upsert_session_commands,
+    upsert_session_files,
 )
 from claude_recall.models import Session
 
@@ -89,7 +94,7 @@ class TestSchema:
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
         assert row is not None
-        assert row["value"] == "2"
+        assert row["value"] == "3"
 
     def test_sessions_columns(self, db_conn):
         cols = {
@@ -378,3 +383,360 @@ class TestFtsTriggers:
             ('"tests"',),
         ).fetchall()
         assert len(rows) >= 1
+
+
+# ===========================================================================
+# Graph tables: session_files, session_commands, graph_edges, session_chains
+# ===========================================================================
+
+class TestGraphTablesExist:
+    def test_session_files_table(self, db_conn):
+        tables = {
+            row[0]
+            for row in db_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "session_files" in tables
+
+    def test_session_commands_table(self, db_conn):
+        tables = {
+            row[0]
+            for row in db_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "session_commands" in tables
+
+    def test_graph_edges_table(self, db_conn):
+        tables = {
+            row[0]
+            for row in db_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "graph_edges" in tables
+
+    def test_session_chains_table(self, db_conn):
+        tables = {
+            row[0]
+            for row in db_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "session_chains" in tables
+
+
+class TestUpsertSessionFiles:
+    def test_insert_files(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        files = [
+            {"path": "src/auth.py", "name": "auth.py", "action": "edit"},
+            {"path": "tests/test_auth.py", "name": "test_auth.py", "action": "edit"},
+        ]
+        upsert_session_files(db_conn, sample_session.session_id, files)
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_files WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchall()
+        assert len(rows) == 2
+        names = {row["file_name"] for row in rows}
+        assert "auth.py" in names
+        assert "test_auth.py" in names
+
+    def test_replace_files(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_session_files(db_conn, sample_session.session_id, [
+            {"path": "old.py", "name": "old.py", "action": "edit"},
+        ])
+        db_conn.commit()
+
+        upsert_session_files(db_conn, sample_session.session_id, [
+            {"path": "new.py", "name": "new.py", "action": "edit"},
+        ])
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_files WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["file_name"] == "new.py"
+
+    def test_empty_files(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_session_files(db_conn, sample_session.session_id, [])
+        db_conn.commit()
+
+        count = db_conn.execute(
+            "SELECT COUNT(*) FROM session_files WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_search_by_file_name(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_session_files(db_conn, sample_session.session_id, [
+            {"path": "src/auth.py", "name": "auth.py", "action": "edit"},
+        ])
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_files WHERE file_name = ?",
+            ("auth.py",),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == sample_session.session_id
+
+
+class TestUpsertSessionCommands:
+    def test_insert_commands(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        cmds = [
+            {"command": "pytest tests/", "command_name": "pytest"},
+            {"command": "git status", "command_name": "git"},
+        ]
+        upsert_session_commands(db_conn, sample_session.session_id, cmds)
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_commands WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchall()
+        assert len(rows) == 2
+        names = {row["command_name"] for row in rows}
+        assert "pytest" in names
+        assert "git" in names
+
+    def test_empty_commands(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_session_commands(db_conn, sample_session.session_id, [])
+        db_conn.commit()
+
+        count = db_conn.execute(
+            "SELECT COUNT(*) FROM session_commands WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchone()[0]
+        assert count == 0
+
+
+class TestUpsertGraphEdges:
+    def test_insert_edges(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        edges = [
+            {
+                "src_type": "session", "src_name": sample_session.session_id,
+                "dst_type": "file", "dst_name": "auth.py",
+                "rel": "edited",
+            },
+            {
+                "src_type": "session", "src_name": sample_session.session_id,
+                "dst_type": "command", "dst_name": "pytest",
+                "rel": "ran",
+            },
+        ]
+        upsert_graph_edges(db_conn, sample_session.session_id, edges)
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM graph_edges WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchall()
+        assert len(rows) == 2
+
+    def test_replace_edges(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_graph_edges(db_conn, sample_session.session_id, [
+            {
+                "src_type": "session", "src_name": sample_session.session_id,
+                "dst_type": "file", "dst_name": "old.py",
+                "rel": "edited",
+            },
+        ])
+        db_conn.commit()
+
+        upsert_graph_edges(db_conn, sample_session.session_id, [
+            {
+                "src_type": "session", "src_name": sample_session.session_id,
+                "dst_type": "file", "dst_name": "new.py",
+                "rel": "edited",
+            },
+        ])
+        db_conn.commit()
+
+        rows = db_conn.execute(
+            "SELECT * FROM graph_edges WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["target_name"] == "new.py"
+
+    def test_empty_edges(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        upsert_graph_edges(db_conn, sample_session.session_id, [])
+        db_conn.commit()
+
+        count = db_conn.execute(
+            "SELECT COUNT(*) FROM graph_edges WHERE session_id = ?",
+            (sample_session.session_id,),
+        ).fetchone()[0]
+        assert count == 0
+
+
+class TestBuildSessionChains:
+    def test_chains_same_project_branch(self, db_conn):
+        """Sessions in the same project/branch within 4h should chain."""
+        s1 = Session(
+            session_id="chain1",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/chain1.jsonl",
+            git_branch="main",
+            created="2025-01-15T10:00:00Z",
+            modified="2025-01-15T10:30:00Z",
+            is_subagent=False,
+        )
+        s2 = Session(
+            session_id="chain2",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/chain2.jsonl",
+            git_branch="main",
+            created="2025-01-15T12:00:00Z",
+            modified="2025-01-15T12:30:00Z",
+            is_subagent=False,
+        )
+        upsert_session(db_conn, s1)
+        upsert_session(db_conn, s2)
+        db_conn.commit()
+
+        build_session_chains(db_conn)
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_chains ORDER BY chain_order"
+        ).fetchall()
+        assert len(rows) == 2
+        # Both should share the same chain_id
+        assert rows[0]["chain_id"] == rows[1]["chain_id"]
+        assert rows[0]["chain_order"] == 0
+        assert rows[1]["chain_order"] == 1
+
+    def test_chains_different_projects(self, db_conn):
+        """Sessions in different projects should have separate chains."""
+        s1 = Session(
+            session_id="proj_a",
+            project_path="/test/a",
+            project_dir="test-a",
+            file_path="/tmp/a.jsonl",
+            git_branch="main",
+            created="2025-01-15T10:00:00Z",
+            modified="2025-01-15T10:30:00Z",
+            is_subagent=False,
+        )
+        s2 = Session(
+            session_id="proj_b",
+            project_path="/test/b",
+            project_dir="test-b",
+            file_path="/tmp/b.jsonl",
+            git_branch="main",
+            created="2025-01-15T10:00:00Z",
+            modified="2025-01-15T10:30:00Z",
+            is_subagent=False,
+        )
+        upsert_session(db_conn, s1)
+        upsert_session(db_conn, s2)
+        db_conn.commit()
+
+        build_session_chains(db_conn)
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_chains ORDER BY session_id"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["chain_id"] != rows[1]["chain_id"]
+
+    def test_chains_time_gap_breaks_chain(self, db_conn):
+        """Sessions >4h apart should be in separate chains."""
+        s1 = Session(
+            session_id="gap1",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/gap1.jsonl",
+            git_branch="main",
+            created="2025-01-15T10:00:00Z",
+            modified="2025-01-15T10:30:00Z",
+            is_subagent=False,
+        )
+        s2 = Session(
+            session_id="gap2",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/gap2.jsonl",
+            git_branch="main",
+            created="2025-01-15T20:00:00Z",
+            modified="2025-01-15T20:30:00Z",
+            is_subagent=False,
+        )
+        upsert_session(db_conn, s1)
+        upsert_session(db_conn, s2)
+        db_conn.commit()
+
+        build_session_chains(db_conn)
+
+        rows = db_conn.execute(
+            "SELECT * FROM session_chains ORDER BY session_id"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["chain_id"] != rows[1]["chain_id"]
+
+
+class TestGetRelatedSessions:
+    def test_finds_related_by_shared_files(self, db_conn):
+        """Sessions editing the same file should be related."""
+        s1 = Session(
+            session_id="rel1",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/rel1.jsonl",
+            summary="Auth work",
+            message_count=5,
+            modified="2025-01-15T10:00:00Z",
+            is_subagent=False,
+        )
+        s2 = Session(
+            session_id="rel2",
+            project_path="/test",
+            project_dir="test",
+            file_path="/tmp/rel2.jsonl",
+            summary="More auth work",
+            message_count=3,
+            modified="2025-01-16T10:00:00Z",
+            is_subagent=False,
+        )
+        upsert_session(db_conn, s1)
+        upsert_session(db_conn, s2)
+
+        # Both sessions edited auth.py
+        upsert_graph_edges(db_conn, "rel1", [
+            {"src_type": "session", "src_name": "rel1",
+             "dst_type": "file", "dst_name": "auth.py", "rel": "edited"},
+        ])
+        upsert_graph_edges(db_conn, "rel2", [
+            {"src_type": "session", "src_name": "rel2",
+             "dst_type": "file", "dst_name": "auth.py", "rel": "edited"},
+        ])
+        db_conn.commit()
+
+        related = get_related_sessions(db_conn, "rel1")
+        assert len(related) == 1
+        assert related[0]["session_id"] == "rel2"
+        assert related[0]["shared_files"] == 1
+
+    def test_no_related_sessions(self, db_conn, sample_session):
+        upsert_session(db_conn, sample_session)
+        db_conn.commit()
+
+        related = get_related_sessions(db_conn, sample_session.session_id)
+        assert len(related) == 0

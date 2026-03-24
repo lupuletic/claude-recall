@@ -329,6 +329,15 @@ def _cmd_info(args: argparse.Namespace) -> None:
     stats = get_stats(conn)
 
     chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
+    # Graph stats
+    try:
+        edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
+        files = conn.execute("SELECT COUNT(DISTINCT file_name) FROM session_files").fetchone()[0]
+        chains = conn.execute("SELECT COUNT(DISTINCT chain_id) FROM session_chains").fetchone()[0]
+    except Exception:
+        edges = files = chains = 0
+
     conn.close()
 
     print(f"claude-recall v{__version__}")
@@ -342,6 +351,7 @@ def _cmd_info(args: argparse.Namespace) -> None:
     print(f"  Chunks: {chunk_count}")
     print(f"  Projects: {stats.get('projects', 0)}")
     print(f"  Messages: {stats.get('total_messages', 0)}")
+    print(f"  Graph: {edges} edges, {files} unique files, {chains} session chains")
     print(f"  Source size: {format_size(stats.get('total_size', 0) or 0)}")
     print(
         f"  Date range: {format_date(stats.get('earliest'))} to "

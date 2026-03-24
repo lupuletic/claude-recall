@@ -6,7 +6,7 @@ import math
 import sqlite3
 from pathlib import Path
 
-from claude_recall.db import DB_PATH, get_connection, has_vec_table
+from claude_recall.db import DB_PATH, get_connection, get_related_sessions, has_vec_table
 from claude_recall.models import SearchResult, Session
 
 
@@ -49,6 +49,14 @@ def _search_pipeline(
     conn, query, limit, project_filter, after, before, semantic, min_messages,
 ) -> list[SearchResult]:
     """Core search pipeline. Connection managed by caller."""
+    # Check for structured query prefixes
+    if query.startswith("file:"):
+        return _file_search(conn, query[5:].strip(), limit, project_filter)
+    if query.startswith("cmd:"):
+        return _command_search(conn, query[4:].strip(), limit, project_filter)
+    if query.startswith("branch:"):
+        return _branch_search(conn, query[7:].strip(), limit, project_filter)
+
     # Determine if we should do semantic search
     use_semantic = semantic if semantic is not None else has_vec_table(conn)
     if use_semantic:
@@ -623,6 +631,126 @@ def _llm_rerank(query: str, results: list[SearchResult]) -> list[SearchResult]:
             reranked.append(r)
 
     return reranked
+
+
+def _file_search(
+    conn: sqlite3.Connection,
+    file_query: str,
+    limit: int,
+    project_filter: str | None,
+) -> list[SearchResult]:
+    """Search by file name/path using the normalized session_files table."""
+    where_parts = ["s.is_subagent = 0"]
+    params: list = [f"%{file_query}%", f"%{file_query}%"]
+    if project_filter:
+        where_parts.append("s.project_path LIKE ?")
+        params.append(f"%{project_filter}%")
+
+    where_clause = " AND ".join(where_parts)
+    params.append(limit)
+
+    rows = conn.execute(f"""
+        SELECT DISTINCT sf.session_id, sf.file_path, sf.action, s.*
+        FROM session_files sf
+        JOIN sessions s ON s.session_id = sf.session_id
+        WHERE (sf.file_name LIKE ? OR sf.file_path LIKE ?)
+        AND {where_clause}
+        ORDER BY s.modified DESC
+        LIMIT ?
+    """, params).fetchall()
+
+    results = []
+    for row in rows:
+        session = _row_to_session(row)
+        results.append(SearchResult(
+            session=session,
+            score=1.0,
+            snippets=[f"{row['action'].title()}ed: {row['file_path']}"],
+        ))
+
+    # Normalize scores by recency
+    for i, r in enumerate(results):
+        r.score = 1.0 - (i / max(len(results), 1))
+    return results
+
+
+def _command_search(
+    conn: sqlite3.Connection,
+    cmd_query: str,
+    limit: int,
+    project_filter: str | None,
+) -> list[SearchResult]:
+    """Search by command name using the normalized session_commands table."""
+    where_parts = ["s.is_subagent = 0"]
+    params: list = [f"%{cmd_query}%", f"%{cmd_query}%"]
+    if project_filter:
+        where_parts.append("s.project_path LIKE ?")
+        params.append(f"%{project_filter}%")
+
+    where_clause = " AND ".join(where_parts)
+    params.append(limit)
+
+    rows = conn.execute(f"""
+        SELECT DISTINCT sc.session_id, sc.command, sc.command_name, s.*
+        FROM session_commands sc
+        JOIN sessions s ON s.session_id = sc.session_id
+        WHERE (sc.command_name LIKE ? OR sc.command LIKE ?)
+        AND {where_clause}
+        ORDER BY s.modified DESC
+        LIMIT ?
+    """, params).fetchall()
+
+    results = []
+    for row in rows:
+        session = _row_to_session(row)
+        results.append(SearchResult(
+            session=session,
+            score=1.0,
+            snippets=[f"Ran: {row['command']}"],
+        ))
+
+    for i, r in enumerate(results):
+        r.score = 1.0 - (i / max(len(results), 1))
+    return results
+
+
+def _branch_search(
+    conn: sqlite3.Connection,
+    branch_query: str,
+    limit: int,
+    project_filter: str | None,
+) -> list[SearchResult]:
+    """Search by git branch name."""
+    where_parts = ["s.is_subagent = 0", "(s.git_branch LIKE ? OR s.git_branch_detected LIKE ?)"]
+    params: list = [f"%{branch_query}%", f"%{branch_query}%"]
+    if project_filter:
+        where_parts.append("s.project_path LIKE ?")
+        params.append(f"%{project_filter}%")
+
+    where_clause = " AND ".join(where_parts)
+    params.append(limit)
+
+    rows = conn.execute(f"""
+        SELECT s.*
+        FROM sessions s
+        WHERE {where_clause}
+        ORDER BY s.modified DESC
+        LIMIT ?
+    """, params).fetchall()
+
+    results = []
+    for row in rows:
+        session = _row_to_session(row)
+        branch = session.git_branch or session.git_branch_detected or ""
+        results.append(SearchResult(
+            session=session,
+            score=1.0,
+            snippets=[f"Branch: {branch}"],
+        ))
+
+    for i, r in enumerate(results):
+        r.score = 1.0 - (i / max(len(results), 1))
+    return results
 
 
 def _prepare_fts_query(query: str, use_prefix: bool = True) -> str:
