@@ -175,7 +175,9 @@ class PreviewPanel(Static):
         lines.append(f"\n[bold green]↵ Enter to resume[/bold green]  [dim]Ctrl+D for AI summary[/dim]")
         lines.append(f"[dim]{s.session_id}[/dim]")
 
-        self.update("\n".join(lines))
+        content = "\n".join(lines)
+        self._content = content  # type: ignore[attr-defined]
+        self.update(content)
 
 
 class SettingsScreen(ModalScreen):
@@ -655,9 +657,9 @@ class RecallApp(App):
     def _append_to_preview(self, text: str) -> None:
         """Append text to the current preview content."""
         preview = self.query_one("#preview", PreviewPanel)
-        current = preview.renderable
-        if isinstance(current, str):
-            preview.update(current + text)
+        current = getattr(preview, "_content", "")
+        preview._content = current + text  # type: ignore[attr-defined]
+        preview.update(preview._content)
 
     def action_summarize(self) -> None:
         """Manually trigger AI summary of the selected session."""

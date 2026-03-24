@@ -243,7 +243,14 @@ def _fts_search_relaxed(
     if not terms:
         return []
 
-    relaxed_query = " OR ".join(f'"{t}"' for t in terms)
+    # Use prefix matching in relaxed mode for broader coverage
+    parts = []
+    for t in terms:
+        if len(t) >= 3:
+            parts.append(f'("{t}" OR "{t}"*)')
+        else:
+            parts.append(f'"{t}"')
+    relaxed_query = " OR ".join(parts)
 
     # Build WHERE clauses
     where_parts = ["s.is_subagent = 0"]
@@ -491,8 +498,9 @@ def _apply_depth_boost(results: list[SearchResult]) -> None:
     """
     for r in results:
         mc = max(r.session.message_count, 1)
-        boost = 1.0 + 0.1 * math.log2(mc)
-        # Extra penalty for 1-message sessions — likely automated
+        # Mild tiebreaker: 2 msgs → 1.05x, 10 msgs → 1.17x, 50 msgs → 1.28x
+        boost = 1.0 + 0.05 * math.log2(mc)
+        # Strong penalty for 1-message sessions — likely automated CI/bots
         if mc == 1:
             boost *= 0.5
         r.score *= boost
@@ -527,20 +535,44 @@ def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
 
     This helps "find my conversation" queries where the user remembers
     exactly what they typed, e.g. "give me the final version".
+    Also boosts sessions where query terms are central to the conversation
+    (high term density in summary/prompts), not just mentioned in passing.
     """
     query_lower = query.lower().strip()
-    if len(query_lower) < 5:
+    if len(query_lower) < 3:
         return
 
+    # Extract meaningful query terms for density check
+    terms = [
+        t for t in query_lower.split()
+        if t not in _STOP_WORDS and len(t) > 1
+    ]
+
     for r in results:
-        # Check if query is a near-exact substring of first or last prompt
         first_prompt = (r.session.first_prompt or "").lower()
         last_prompt = (r.session.last_prompt or "").lower()
+        summary = (r.session.summary or "").lower()
 
-        if query_lower in last_prompt or last_prompt in query_lower:
-            r.score *= 2.0
-        elif query_lower in first_prompt or first_prompt in query_lower:
-            r.score *= 1.8
+        # Strong boost: query is a near-exact match of a prompt
+        if len(query_lower) >= 5:
+            if query_lower in last_prompt or last_prompt in query_lower:
+                r.score *= 3.0
+                continue
+            if query_lower in first_prompt or first_prompt in query_lower:
+                r.score *= 2.5
+                continue
+
+        # Term centrality boost: if query terms appear in the summary
+        # or first prompt, the session is likely ABOUT this topic,
+        # not just mentioning it in passing.
+        if terms:
+            summary_matches = sum(1 for t in terms if t in summary)
+            prompt_matches = sum(1 for t in terms if t in first_prompt)
+            best_match = max(summary_matches, prompt_matches)
+            if best_match > 0:
+                # Boost proportional to match fraction
+                fraction = best_match / len(terms)
+                r.score *= 1.0 + 0.5 * fraction
 
 
 # Common English stop words that pollute FTS results
@@ -845,8 +877,10 @@ def _prepare_fts_query(query: str, use_prefix: bool = True) -> str:
 
     if len(terms) == 1:
         t = terms[0]
-        if use_prefix and len(t) >= 3:
-            return f'"{t}" OR "{t}"{suffix}'
+        # For single-term queries, exact match is sufficient.
+        # Prefix matching adds noise (e.g. "reshot*" matching "resolution").
+        # The relaxed search fallback handles the case where exact match
+        # returns too few results.
         return f'"{t}"'
 
     # Quote each term to escape FTS5 special chars (colons, parens, etc.)
