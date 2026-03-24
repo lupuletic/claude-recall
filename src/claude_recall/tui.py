@@ -514,14 +514,14 @@ class RecallApp(App):
         self.call_from_thread(self._display_results, results, query)
 
     def _display_results(self, results: list[SearchResult], query: str = "") -> None:
-        """Update the results list."""
+        """Update the results list. Uses batch_update to prevent flickering."""
         list_view = self.query_one("#results", ListView)
-        list_view.clear()
-        list_view.styles.opacity = 1.0  # Restore full opacity
-
         status = self.query_one("#status", Label)
 
         if not results:
+            with self.batch_update():
+                list_view.clear()
+                list_view.styles.opacity = 1.0
             if query:
                 status.update(f'No results for "{query}"')
             else:
@@ -533,8 +533,12 @@ class RecallApp(App):
             f"↓ to navigate, Enter to resume, Ctrl+D for AI summary"
         )
 
-        for i, result in enumerate(results, 1):
-            list_view.append(SessionItem(result, i))
+        # batch_update prevents intermediate repaints (no flicker)
+        with self.batch_update():
+            list_view.clear()
+            for i, result in enumerate(results, 1):
+                list_view.append(SessionItem(result, i))
+            list_view.styles.opacity = 1.0
 
     def action_toggle_preview(self) -> None:
         """Toggle the preview panel."""
