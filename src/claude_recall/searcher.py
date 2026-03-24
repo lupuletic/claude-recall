@@ -503,6 +503,12 @@ def _apply_depth_boost(results: list[SearchResult]) -> None:
         # Strong penalty for 1-message sessions — likely automated CI/bots
         if mc == 1:
             boost *= 0.5
+        # Mild boost for project-specific sessions over generic root paths.
+        # Sessions at ~/Projects (no sub-project) are often meta-conversations
+        # spanning multiple topics, less likely to be THE session about X.
+        path_parts = r.session.project_path.rstrip("/").split("/")
+        if len(path_parts) > 0 and path_parts[-1] in ("Projects", "Downloads", "Desktop", "Documents"):
+            boost *= 0.85
         r.score *= boost
 
 
@@ -553,13 +559,14 @@ def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
         last_prompt = (r.session.last_prompt or "").lower()
         summary = (r.session.summary or "").lower()
 
-        # Strong boost: query is a near-exact match of a prompt
+        # Strong boost: query is a near-exact match of a prompt.
+        # This is the "I remember what I typed" case — the strongest signal.
         if len(query_lower) >= 5:
             if query_lower in last_prompt or last_prompt in query_lower:
-                r.score *= 3.0
+                r.score *= 5.0
                 continue
             if query_lower in first_prompt or first_prompt in query_lower:
-                r.score *= 2.5
+                r.score *= 4.0
                 continue
 
         # Term centrality boost: if query terms appear in the summary

@@ -619,7 +619,7 @@ class RecallApp(App):
             return
 
         # Show spinner in preview
-        self.call_from_thread(self._append_to_preview, "\n[bold]Loading AI summary...[/bold] ⏳")
+        self.call_from_thread(self._append_to_preview, "\n[bold]⏳ Loading AI summary...[/bold]")
 
         prompt = (
             f"Summarize this Claude Code session in 2-3 concise bullet points. "
@@ -645,12 +645,12 @@ class RecallApp(App):
         # Only update if user is still on the same result
         if self._selected_result == result and summary:
             self.call_from_thread(
-                self._append_to_preview,
+                self._replace_spinner,
                 f"\n[bold]AI Summary:[/bold]\n[italic]{summary}[/italic]",
             )
         elif self._selected_result == result:
             self.call_from_thread(
-                self._append_to_preview,
+                self._replace_spinner,
                 "\n[dim]AI summary unavailable[/dim]",
             )
 
@@ -660,6 +660,17 @@ class RecallApp(App):
         current = getattr(preview, "_content", "")
         preview._content = current + text  # type: ignore[attr-defined]
         preview.update(preview._content)
+
+    def _replace_spinner(self, text: str) -> None:
+        """Replace the loading spinner with final content and scroll to bottom."""
+        preview = self.query_one("#preview", PreviewPanel)
+        current = getattr(preview, "_content", "")
+        # Remove the spinner line
+        current = current.replace("\n[bold]⏳ Loading AI summary...[/bold]", "")
+        preview._content = current + text  # type: ignore[attr-defined]
+        preview.update(preview._content)
+        # Scroll preview to bottom to show the summary
+        preview.scroll_end(animate=False)
 
     def action_summarize(self) -> None:
         """Manually trigger AI summary of the selected session."""
