@@ -388,7 +388,7 @@ class RecallApp(App):
 
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
-        Binding("tab", "toggle_preview", "Preview", show=True),
+        Binding("ctrl+p", "toggle_preview", "Preview", show=True),
         Binding("ctrl+d", "summarize", "AI Summary", show=True),
         Binding("ctrl+s", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
@@ -513,7 +513,7 @@ class RecallApp(App):
             preview.update_preview(event.item.result)
             # Update status with context-aware hints
             self.query_one("#status", Label).update(
-                "Enter=Resume  Ctrl+D=AI Summary  Tab=Hide Preview  Esc=Quit"
+                "Enter=Resume  Ctrl+D=AI Summary  Ctrl+P=Toggle Preview  Esc=Quit"
             )
 
     @work(exclusive=True, thread=True)
