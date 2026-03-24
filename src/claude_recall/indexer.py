@@ -112,6 +112,12 @@ def build_index(
 
         import json as _json
 
+        # Append file names to messages_text so they're FTS-searchable
+        messages_text = parsed["messages_text"]
+        file_names = parsed.get("files_modified", [])
+        if file_names:
+            messages_text += "\n" + " ".join(file_names)
+
         session = Session(
             session_id=session_id,
             project_path=project_path,
@@ -122,7 +128,7 @@ def build_index(
             first_reply=parsed["first_reply"],
             last_prompt=parsed["last_prompt"],
             last_reply=parsed["last_reply"],
-            messages_text=parsed["messages_text"],
+            messages_text=messages_text,
             git_branch=idx_meta.get("gitBranch") or parsed.get("git_branch_detected"),
             files_modified=_json.dumps(parsed.get("files_modified", [])),
             commands_run=_json.dumps(parsed.get("commands_run", [])),
