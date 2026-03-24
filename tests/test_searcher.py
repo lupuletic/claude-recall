@@ -429,7 +429,7 @@ class TestCrossEncoderRerank:
 
         r0 = self._make_result("a", "auth debugging")
         r1 = self._make_result("b", "middleware fix")
-        result = _cross_encoder_rerank("middleware", [r0, r1])
+        result = _cross_encoder_rerank("fixing the middleware auth bug in production", [r0, r1])
 
         assert len(result) >= 1
         assert result[0].session.session_id == "b"
@@ -446,7 +446,8 @@ class TestCrossEncoderRerank:
 
         r0 = self._make_result("strong", "auth debug")
         r1 = self._make_result("weak", "unrelated")
-        result = _cross_encoder_rerank("auth", [r0, r1])
+        r1.session.project_dir = "different_project"  # different project so cutoff applies
+        result = _cross_encoder_rerank("debugging the authentication flow in production", [r0, r1])
 
         # The weak result should be dropped (0.1 is less than 0.4 * 0.9 normalized)
         # After normalization: strong=1.0, weak=0.0; cutoff = 1.0 * 0.4 = 0.4
