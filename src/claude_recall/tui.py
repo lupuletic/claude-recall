@@ -422,6 +422,7 @@ class RecallApp(App):
         super().__init__()
         self.initial_query = initial_query
         self._results = initial_results or []
+        self._preview_hidden = False  # user explicitly closed preview
         self._selected_result: SearchResult | None = None
 
     def compose(self) -> ComposeResult:
@@ -529,9 +530,9 @@ class RecallApp(App):
         """Update preview when a result is highlighted, then auto-load AI summary."""
         if event.item and isinstance(event.item, SessionItem):
             self._selected_result = event.item.result
-            # Auto-show preview panel
+            # Auto-show preview panel (unless user explicitly closed it)
             preview = self.query_one("#preview", PreviewPanel)
-            if "visible" not in preview.classes:
+            if not self._preview_hidden and "visible" not in preview.classes:
                 preview.add_class("visible")
             preview.update_preview(event.item.result)
             # Auto-load AI summary in background
@@ -594,6 +595,7 @@ class RecallApp(App):
         """Toggle the preview panel."""
         preview = self.query_one("#preview", PreviewPanel)
         preview.toggle_class("visible")
+        self._preview_hidden = "visible" not in preview.classes
 
     @work(thread=True, group="auto-summary")
     def _auto_summarize(self, result: SearchResult) -> None:
