@@ -460,7 +460,7 @@ class RecallApp(App):
             self._selected_result = None
             # Clear preview
             preview = self.query_one("#preview", PreviewPanel)
-            preview.update("[dim]Type a query to search[/dim]")
+            preview._set_content("[dim]Type a query to search[/dim]")
             return
 
         # Show what we're searching for — user knows search is happening
@@ -676,7 +676,7 @@ class RecallApp(App):
         preview = self.query_one("#preview", PreviewPanel)
         if "visible" not in preview.classes:
             preview.add_class("visible")
-        preview.update("[bold]Generating AI summary...[/bold]")
+        preview._set_content("[bold]Generating AI summary...[/bold]")
         self._run_summarize(self._selected_result)
 
     @work(exclusive=True, thread=True)
