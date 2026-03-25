@@ -201,9 +201,9 @@ When you resume a session, claude-recall `cd`s to the original project directory
 
 ```bash
 claude-recall config                              # view settings
-claude-recall config search_mode reranked         # best local accuracy
-claude-recall config search_mode llm              # best accuracy (uses Claude)
-claude-recall config search_mode keyword          # fastest, zero deps
+claude-recall config search_mode hybrid         # keyword + semantic + reranking (default)
+claude-recall config search_mode llm              # + Claude LLM reranking (best, ~10s)
+claude-recall config search_mode keyword          # FTS only (fastest, no deps)
 claude-recall config limit 20                     # more results
 ```
 
