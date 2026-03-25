@@ -621,8 +621,8 @@ class RecallApp(App):
         if not claude_bin:
             return
 
-        # Show spinner in preview
-        self.call_from_thread(self._append_to_preview, "\n[bold]⏳ Loading AI summary...[/bold]")
+        # Show animated loading indicator in preview
+        self.call_from_thread(self._show_loading_indicator)
 
         prompt = (
             f"Summarize this Claude Code session in 2-3 concise bullet points. "
@@ -657,17 +657,43 @@ class RecallApp(App):
                 "\n[dim]AI summary unavailable[/dim]",
             )
 
+    def _show_loading_indicator(self) -> None:
+        """Show an animated loading indicator at the bottom of the preview."""
+        from textual.widgets import LoadingIndicator
+
+        preview = self.query_one("#preview", PreviewPanel)
+        # Add loading indicator as a child widget
+        preview.mount(Static("[bold]Generating AI summary...[/bold]", markup=True))
+        indicator = LoadingIndicator()
+        indicator.styles.height = 3
+        preview.mount(indicator)
+        preview.scroll_end(animate=False)
+
+    def _remove_loading_indicator(self) -> None:
+        """Remove the loading indicator and replace with summary."""
+        from textual.widgets import LoadingIndicator
+
+        preview = self.query_one("#preview", PreviewPanel)
+        for widget in preview.query(LoadingIndicator):
+            widget.remove()
+        # Also remove the "Generating..." Static
+        for widget in preview.query(Static):
+            try:
+                if "Generating AI summary" in str(getattr(widget, "_content", "")):
+                    widget.remove()
+            except Exception:
+                pass
+
     def _append_to_preview(self, text: str) -> None:
         """Append text to the current preview content."""
         self.query_one("#preview", PreviewPanel)._append_content(text)
 
     def _replace_spinner(self, text: str) -> None:
-        """Replace the loading spinner with final content and scroll to bottom."""
+        """Replace the loading indicator with the summary text."""
+        self._remove_loading_indicator()
         preview = self.query_one("#preview", PreviewPanel)
-        current = getattr(preview, "_content", "")
-        current = current.replace("\n[bold]⏳ Loading AI summary...[/bold]", "")
-        preview._content = current  # type: ignore[attr-defined]
-        preview._append_content(text)
+        preview.mount(Static(text, markup=True))
+        preview.scroll_end(animate=False)
 
     def action_summarize(self) -> None:
         """Manually trigger AI summary of the selected session."""
