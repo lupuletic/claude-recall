@@ -108,6 +108,11 @@ def _first_run_setup(args: argparse.Namespace) -> None:
 
 def _auto_install_hooks() -> None:
     """Silently install SessionEnd hooks on first run."""
+    from claude_recall.config import load_config
+
+    if not load_config().get("auto_index_hook", True):
+        return
+
     import shutil
 
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -179,6 +184,10 @@ def _cmd_search(args: argparse.Namespace) -> None:
 
     config = load_config()
     query = " ".join(args.query)
+
+    # Use config limit if user didn't explicitly set -n (default is 10)
+    if args.limit == 10:
+        args.limit = config.get("limit", 10)
 
     # Determine search mode from config + CLI flags
     semantic = None  # None = auto-detect (use if available)

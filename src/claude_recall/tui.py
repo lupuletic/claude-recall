@@ -598,6 +598,11 @@ class RecallApp(App):
     @work(thread=True, group="auto-summary")
     def _auto_summarize(self, result: SearchResult) -> None:
         """Auto-load AI summary in background when a result is highlighted."""
+        from claude_recall.config import load_config
+
+        if not load_config().get("auto_ai_summary", True):
+            return
+
         import shutil
         import subprocess
         import time

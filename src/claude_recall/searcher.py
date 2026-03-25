@@ -10,6 +10,13 @@ from claude_recall.db import DB_PATH, get_connection, get_related_sessions, has_
 from claude_recall.models import SearchResult, Session
 
 
+def _should_show_subagents() -> bool:
+    """Check config to determine if subagent sessions should be shown."""
+    from claude_recall.config import load_config
+
+    return load_config().get("show_subagents", False)
+
+
 def search(
     query: str,
     db_path: Path = DB_PATH,
@@ -197,8 +204,9 @@ def _fts_search(
     where_parts = []
     params: list = []
 
-    # Exclude subagent sessions — show only main sessions
-    where_parts.append("s.is_subagent = 0")
+    # Exclude subagent sessions unless config says to show them
+    if not _should_show_subagents():
+        where_parts.append("s.is_subagent = 0")
 
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -286,7 +294,7 @@ def _fts_search_raw(
     min_messages: int,
 ) -> list[SearchResult]:
     """FTS search with a raw pre-built FTS5 query string."""
-    where_parts = ["s.is_subagent = 0"]
+    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
     params: list = []
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -371,7 +379,7 @@ def _fts_search_relaxed(
     relaxed_query = " OR ".join(parts)
 
     # Build WHERE clauses
-    where_parts = ["s.is_subagent = 0"]
+    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
     params: list = []
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -385,7 +393,7 @@ def _fts_search_relaxed(
     if min_messages > 0:
         where_parts.append("s.message_count >= ?")
         params.append(min_messages)
-    where_clause = "AND " + " AND ".join(where_parts)
+    where_clause = "AND " + " AND ".join(where_parts) if where_parts else ""
 
     sql = f"""
         SELECT s.*,
@@ -868,8 +876,11 @@ def _cross_encoder_rerank(query: str, results: list[SearchResult]) -> list[Searc
     # Drop results that are clearly irrelevant compared to the top result
     # BUT keep results from the same project (they're likely related sessions)
     if len(reranked) >= 2 and reranked[0].score > 0.5:
+        from claude_recall.config import load_config
+
+        cutoff_pct = load_config().get("relevance_cutoff", 0.4)
         top_project = reranked[0].session.project_dir
-        cutoff = reranked[0].score * 0.4
+        cutoff = reranked[0].score * cutoff_pct
         reranked = [
             r for r in reranked
             if r.score >= cutoff or r.session.project_dir == top_project
@@ -921,13 +932,13 @@ def _file_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by file name/path using the normalized session_files table."""
-    where_parts = ["s.is_subagent = 0"]
+    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
     params: list = [f"%{file_query}%", f"%{file_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
         params.append(f"%{project_filter}%")
 
-    where_clause = " AND ".join(where_parts)
+    extra_where = "AND " + " AND ".join(where_parts) if where_parts else ""
     params.append(limit)
 
     rows = conn.execute(f"""
@@ -935,7 +946,7 @@ def _file_search(
         FROM session_files sf
         JOIN sessions s ON s.session_id = sf.session_id
         WHERE (sf.file_name LIKE ? OR sf.file_path LIKE ?)
-        AND {where_clause}
+        {extra_where}
         ORDER BY s.modified DESC
         LIMIT ?
     """, params).fetchall()
@@ -962,13 +973,13 @@ def _command_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by command name using the normalized session_commands table."""
-    where_parts = ["s.is_subagent = 0"]
+    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
     params: list = [f"%{cmd_query}%", f"%{cmd_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
         params.append(f"%{project_filter}%")
 
-    where_clause = " AND ".join(where_parts)
+    extra_where = "AND " + " AND ".join(where_parts) if where_parts else ""
     params.append(limit)
 
     rows = conn.execute(f"""
@@ -976,7 +987,7 @@ def _command_search(
         FROM session_commands sc
         JOIN sessions s ON s.session_id = sc.session_id
         WHERE (sc.command_name LIKE ? OR sc.command LIKE ?)
-        AND {where_clause}
+        {extra_where}
         ORDER BY s.modified DESC
         LIMIT ?
     """, params).fetchall()
@@ -1002,7 +1013,10 @@ def _branch_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by git branch name."""
-    where_parts = ["s.is_subagent = 0", "(s.git_branch LIKE ? OR s.git_branch_detected LIKE ?)"]
+    show_sub = _should_show_subagents()
+    where_parts = ["(s.git_branch LIKE ? OR s.git_branch_detected LIKE ?)"]
+    if not show_sub:
+        where_parts.insert(0, "s.is_subagent = 0")
     params: list = [f"%{branch_query}%", f"%{branch_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")

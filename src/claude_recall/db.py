@@ -138,6 +138,7 @@ def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
         # Semantic search won't be available, but FTS5 still works
         pass
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=10000")  # wait up to 10s for locks
@@ -332,7 +333,20 @@ def get_all_session_ids(conn: sqlite3.Connection) -> set[str]:
 
 
 def delete_session(conn: sqlite3.Connection, session_id: str) -> None:
-    """Remove a session from the index."""
+    """Remove a session and all related data from the index."""
+    # Delete vec entries BEFORE chunks (chunks are needed to find vec rows)
+    try:
+        conn.execute(
+            """DELETE FROM chunks_vec WHERE chunk_rowid IN
+               (SELECT chunk_id FROM chunks WHERE session_id = ?)""",
+            (session_id,),
+        )
+    except Exception:
+        pass  # chunks_vec may not exist yet
+    conn.execute("DELETE FROM chunks WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM session_files WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM session_commands WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM graph_edges WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
 

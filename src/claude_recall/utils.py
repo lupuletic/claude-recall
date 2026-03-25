@@ -13,7 +13,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 # Max chars to keep for indexed text fields
 MAX_FIRST_PROMPT = 500
 MAX_FIRST_REPLY = 500
-MAX_MESSAGES_TEXT = 10_000
+MAX_MESSAGES_TEXT = 50_000
 
 
 def decode_project_path(project_dir: str, projects_dir: Path = PROJECTS_DIR) -> str:
@@ -215,10 +215,8 @@ def parse_session_file(file_path: str | Path) -> dict:
                             if tool in ("Edit", "Write", "NotebookEdit"):
                                 fp = inp.get("file_path", "")
                                 if fp:
-                                    # Keep just filename or last 2 path parts
-                                    parts = fp.split("/")
-                                    short = "/".join(parts[-2:]) if len(parts) > 1 else fp
-                                    files_modified.add(short)
+                                    # Store full file path for accurate graph edges
+                                    files_modified.add(fp)
 
                             elif tool == "Bash":
                                 cmd = inp.get("command", "").strip()
@@ -250,15 +248,14 @@ def parse_session_file(file_path: str | Path) -> dict:
     # Auto-generate summary from first prompt + reply
     summary = generate_summary(first_prompt, first_reply)
 
-    # Deduplicate and limit commands
+    # Deduplicate commands by full command string and limit
     seen_cmds: set[str] = set()
     unique_cmds: list[str] = []
     for cmd in commands_run:
-        key = cmd.split()[0] if cmd.split() else cmd
-        if key not in seen_cmds:
-            seen_cmds.add(key)
+        if cmd not in seen_cmds:
+            seen_cmds.add(cmd)
             unique_cmds.append(cmd)
-    commands_run = unique_cmds[:10]
+    commands_run = unique_cmds[:30]
 
     return {
         "first_prompt": first_prompt,
@@ -269,7 +266,7 @@ def parse_session_file(file_path: str | Path) -> dict:
         "message_count": len(user_messages),
         "chunks": chunks,
         "summary": summary,
-        "files_modified": sorted(files_modified)[:15],
+        "files_modified": sorted(files_modified)[:50],
         "commands_run": commands_run,
         "git_branch_detected": git_branch_detected,
     }
@@ -278,7 +275,7 @@ def parse_session_file(file_path: str | Path) -> dict:
 # Chunk configuration
 CHUNK_SIZE = 5  # messages per chunk
 CHUNK_OVERLAP = 1  # overlapping messages between chunks
-MAX_CHUNK_CHARS = 1000  # max chars per chunk text
+MAX_CHUNK_CHARS = 2000  # max chars per chunk text
 
 
 def _build_fts_text(user_messages: list[str], assistant_texts: list[str] | None = None) -> str:

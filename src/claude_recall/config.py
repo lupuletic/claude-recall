@@ -13,6 +13,8 @@ DEFAULTS = {
     "show_subagents": False,
     "relevance_cutoff": 0.4,
     "auto_index_hook": True,
+    "auto_ai_summary": True,
+    "update_check": True,
 }
 
 SEARCH_MODES = {

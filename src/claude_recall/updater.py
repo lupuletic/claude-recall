@@ -18,6 +18,11 @@ def check_for_update(quiet: bool = False) -> None:
     if quiet:
         return
 
+    from claude_recall.config import load_config
+
+    if not load_config().get("update_check", True):
+        return
+
     # Skip if checked recently
     if UPDATE_CHECK_FILE.exists():
         try:

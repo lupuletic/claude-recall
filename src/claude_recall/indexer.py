@@ -157,7 +157,7 @@ def build_index(
             file_records.append({"path": file_path, "name": file_name, "action": "edit"})
             graph_edges.append({
                 "src_type": "session", "src_name": session_id,
-                "dst_type": "file", "dst_name": file_name,
+                "dst_type": "file", "dst_name": file_path,
                 "rel": "edited",
             })
 
@@ -314,7 +314,23 @@ def _enrich_parents_with_subagent_content(conn, verbose: bool = False) -> None:
 
     This ensures that searching for terms only used in subagent sessions
     (e.g. project names, specific tools) still finds the parent session.
+
+    Uses a marker to strip previous enrichment before re-adding, preventing
+    duplication on incremental runs.
     """
+    MARKER = "\n--- SUBAGENT CONTENT ---\n"
+
+    # Strip old enrichment from all parents before re-adding
+    conn.execute(
+        """UPDATE sessions
+           SET messages_text = SUBSTR(messages_text, 1,
+               CASE WHEN INSTR(messages_text, ?) > 0
+               THEN INSTR(messages_text, ?) - 1
+               ELSE LENGTH(messages_text) END)
+           WHERE is_subagent = 0""",
+        (MARKER, MARKER),
+    )
+
     rows = conn.execute(
         """SELECT s.session_id AS sub_id, s.parent_session, s.first_prompt
            FROM sessions s
@@ -323,6 +339,7 @@ def _enrich_parents_with_subagent_content(conn, verbose: bool = False) -> None:
     ).fetchall()
 
     if not rows:
+        conn.commit()
         return
 
     # Group subagent prompts by parent
@@ -335,13 +352,13 @@ def _enrich_parents_with_subagent_content(conn, verbose: bool = False) -> None:
 
     enriched = 0
     for parent_id, extras in parent_extras.items():
-        extra_text = "\n".join(extras)
+        extra_text = MARKER + "\n".join(extras)
         # Append to the parent's messages_text
         conn.execute(
             """UPDATE sessions
-               SET messages_text = COALESCE(messages_text, '') || ? || ?
+               SET messages_text = COALESCE(messages_text, '') || ?
                WHERE session_id = ? AND is_subagent = 0""",
-            ("\n", extra_text, parent_id),
+            (extra_text, parent_id),
         )
         enriched += 1
 
