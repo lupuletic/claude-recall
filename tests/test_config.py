@@ -38,7 +38,7 @@ class TestLoadConfig:
 
     def test_default_values(self):
         config = load_config()
-        assert config["search_mode"] == "hybrid"
+        assert config["search_mode"] == "auto"
         assert config["limit"] == 10
         assert config["show_subagents"] is False
         assert config["relevance_cutoff"] == 0.4
@@ -62,14 +62,14 @@ class TestSaveLoadRoundtrip:
         assert loaded["auto_index_hook"] is False
 
     def test_saved_file_is_valid_json(self, config_path):
-        save_config({"search_mode": "semantic"})
+        save_config({"search_mode": "auto"})
         data = json.loads(config_path.read_text())
-        assert data["search_mode"] == "semantic"
+        assert data["search_mode"] == "auto"
 
     def test_creates_parent_dirs(self, tmp_path, monkeypatch):
         nested = tmp_path / "a" / "b" / "config.json"
         monkeypatch.setattr("claude_recall.config.CONFIG_PATH", nested)
-        save_config({"search_mode": "hybrid"})
+        save_config({"search_mode": "auto"})
         assert nested.exists()
 
     def test_merge_with_defaults(self, config_path):
@@ -97,20 +97,20 @@ class TestSetValue:
         assert err is None
         assert load_config()["search_mode"] == "keyword"
 
-    def test_set_search_mode_semantic(self):
-        err = set_value("search_mode", "semantic")
+    def test_set_search_mode_auto(self):
+        err = set_value("search_mode", "auto")
         assert err is None
-        assert load_config()["search_mode"] == "semantic"
+        assert load_config()["search_mode"] == "auto"
 
-    def test_set_search_mode_hybrid(self):
-        err = set_value("search_mode", "hybrid")
+    def test_set_search_mode_auto_2(self):
+        err = set_value("search_mode", "auto")
         assert err is None
-        assert load_config()["search_mode"] == "hybrid"
+        assert load_config()["search_mode"] == "auto"
 
     def test_set_search_mode_reranked(self):
-        err = set_value("search_mode", "reranked")
+        err = set_value("search_mode", "auto")
         assert err is None
-        assert load_config()["search_mode"] == "reranked"
+        assert load_config()["search_mode"] == "auto"
 
     def test_set_invalid_search_mode(self):
         err = set_value("search_mode", "invalid_mode")

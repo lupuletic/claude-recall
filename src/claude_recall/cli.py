@@ -172,15 +172,13 @@ def _cmd_search(args: argparse.Namespace) -> None:
     query = " ".join(args.query)
 
     # Determine search mode from config + CLI flags
-    semantic = None
+    semantic = None  # None = auto-detect (use if available)
     if args.semantic:
         semantic = True
     elif args.no_semantic:
         semantic = False
     elif config["search_mode"] == "keyword":
         semantic = False
-    elif config["search_mode"] == "semantic":
-        semantic = True
 
     # First-run setup (auto-index + hooks)
     _first_run_setup(args)

@@ -8,19 +8,17 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".claude-recall" / "config.json"
 
 DEFAULTS = {
-    "search_mode": "hybrid",  # keyword, semantic, hybrid, reranked
+    "search_mode": "auto",
     "limit": 10,
     "show_subagents": False,
-    "relevance_cutoff": 0.4,  # drop results below this % of top score
+    "relevance_cutoff": 0.4,
     "auto_index_hook": True,
 }
 
 SEARCH_MODES = {
+    "auto": "Best available: keyword + semantic + reranking (recommended)",
     "keyword": "FTS5 keyword search only (fastest, no dependencies)",
-    "semantic": "Embedding-based semantic search only",
-    "hybrid": "Keyword + semantic with RRF fusion",
-    "reranked": "Hybrid + cross-encoder reranking (most accurate, local)",
-    "llm": "Hybrid + reranking + Claude LLM (best quality, ~10s)",
+    "llm": "Full pipeline + Claude LLM reranking (best quality, ~10s)",
 }
 
 
