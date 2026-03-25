@@ -624,18 +624,37 @@ class RecallApp(App):
         # Show animated loading indicator in preview
         self.call_from_thread(self._show_loading_indicator)
 
+        import json as _json
+
+        # Build rich context for the summary
+        files = []
+        try:
+            files = _json.loads(s.files_modified) if s.files_modified else []
+        except Exception:
+            pass
+        cmds = []
+        try:
+            cmds = _json.loads(s.commands_run) if s.commands_run else []
+        except Exception:
+            pass
+
         prompt = (
-            f"Summarize this Claude Code session in 2-3 concise bullet points. "
-            f"What was the goal? What was accomplished?\n\n"
+            f"Based on the following session data, write a 2-3 bullet point summary of "
+            f"what was done in this Claude Code coding session. Be specific and concise.\n\n"
             f"Project: {result.display_project}\n"
-            f"First message: {(s.first_prompt or '')[:300]}\n"
-            f"Last message: {(s.last_prompt or '')[:300]}\n"
+            f"Branch: {s.git_branch or 'unknown'}\n"
             f"Messages: {s.message_count}\n"
+            f"First user message: {(s.first_prompt or '')[:400]}\n"
+            f"Last user message: {(s.last_prompt or '')[:400]}\n"
+            f"First assistant reply: {(s.first_reply or '')[:300]}\n"
+            f"Files modified: {', '.join(files[:10]) if files else 'none'}\n"
+            f"Commands run: {', '.join(cmds[:5]) if cmds else 'none'}\n"
         )
 
         try:
             proc = subprocess.run(
-                [claude_bin, "-p", "--model", "haiku", "--no-session-persistence"],
+                [claude_bin, "-p", "--model", "haiku",
+                 "--no-session-persistence", "--tools", ""],
                 input=prompt,
                 capture_output=True,
                 text=True,
@@ -707,7 +726,8 @@ class RecallApp(App):
 
     @work(exclusive=True, thread=True)
     def _run_summarize(self, result: SearchResult) -> None:
-        """Run claude -p to summarize a session."""
+        """Run claude -p to summarize a session (manual Ctrl+D)."""
+        import json as _json
         import shutil
         import subprocess
 
@@ -715,23 +735,39 @@ class RecallApp(App):
         claude_bin = shutil.which("claude")
         if not claude_bin:
             self.call_from_thread(
-                self.query_one("#preview", PreviewPanel).update,
+                self.query_one("#preview", PreviewPanel)._set_content,
                 "[red]Claude CLI not found[/red]",
             )
             return
 
+        files = []
+        try:
+            files = _json.loads(s.files_modified) if s.files_modified else []
+        except Exception:
+            pass
+        cmds = []
+        try:
+            cmds = _json.loads(s.commands_run) if s.commands_run else []
+        except Exception:
+            pass
+
         prompt = (
-            f"Summarize this Claude Code session in 3-5 bullet points. "
-            f"What was the goal? What was accomplished? What was the last thing worked on?\n\n"
+            f"Based on the following session data, write a 3-5 bullet point summary of "
+            f"what was done in this Claude Code coding session. Be specific.\n\n"
             f"Project: {result.display_project}\n"
-            f"First message: {(s.first_prompt or '')[:300]}\n"
-            f"Last message: {(s.last_prompt or '')[:300]}\n"
+            f"Branch: {s.git_branch or 'unknown'}\n"
             f"Messages: {s.message_count}\n"
+            f"First user message: {(s.first_prompt or '')[:400]}\n"
+            f"Last user message: {(s.last_prompt or '')[:400]}\n"
+            f"First assistant reply: {(s.first_reply or '')[:300]}\n"
+            f"Files modified: {', '.join(files[:10]) if files else 'none'}\n"
+            f"Commands run: {', '.join(cmds[:5]) if cmds else 'none'}\n"
         )
 
         try:
             proc = subprocess.run(
-                [claude_bin, "-p", "--model", "haiku", "--no-session-persistence"],
+                [claude_bin, "-p", "--model", "haiku",
+                 "--no-session-persistence", "--tools", ""],
                 input=prompt,
                 capture_output=True,
                 text=True,
