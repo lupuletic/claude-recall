@@ -90,12 +90,12 @@ class SessionItem(ListItem):
         yield Static("\n".join(lines), markup=True)
 
 
-class PreviewPanel(Static):
-    """Shows detailed info about the selected session."""
+class PreviewPanel(VerticalScroll):
+    """Scrollable preview panel showing session details."""
 
     def update_preview(self, result: SearchResult | None) -> None:
         if result is None:
-            self.update("[dim]Select a session to preview[/dim]")
+            self._set_content("[dim]Select a session to preview[/dim]")
             return
 
         import json as _json
@@ -103,56 +103,50 @@ class PreviewPanel(Static):
         s = result.session
         lines = []
 
-        # Header — title + project + branch
+        # Header — compact, most important info first
         title = _session_title(s, 120)
         lines.append(f"[bold]{title}[/bold]")
+        meta = []
         if s.git_branch:
-            lines.append(f"[cyan]{s.git_branch}[/cyan]")
-        lines.append(f"[dim]{result.display_project}[/dim]")
-        lines.append(
-            f"[dim]{format_date(s.modified)} · {s.message_count} msgs · "
-            f"{format_size(s.file_size)} · {result.score:.0%} match[/dim]"
-        )
+            meta.append(f"[cyan]{s.git_branch}[/cyan]")
+        meta.append(f"[dim]{result.display_project}[/dim]")
+        meta.append(f"[dim]{format_date(s.modified)} · {s.message_count} msgs · {result.score:.0%}[/dim]")
+        lines.append(" · ".join(meta))
 
-        # Files modified — the "fingerprint" of the session
+        # Action hint at the top (visible without scrolling)
+        lines.append(f"[bold green]↵ Enter to resume[/bold green]")
+
+        # Started with + Left off (compact)
+        if s.first_prompt:
+            fp = clean_display_text(s.first_prompt) or ""
+            if fp:
+                lines.append(f"\n[bold]Started:[/bold] [dim]{fp[:150]}[/dim]")
+        if s.last_prompt and s.last_prompt != s.first_prompt:
+            lp = clean_display_text(s.last_prompt) or ""
+            if lp:
+                lines.append(f"[bold]Left off:[/bold] [dim]{lp[:150]}[/dim]")
+
+        # Files modified (compact, 5 max)
         files = []
         try:
             files = _json.loads(s.files_modified) if s.files_modified else []
         except (ValueError, TypeError):
             pass
         if files:
-            lines.append(f"\n[bold]Files modified:[/bold]")
-            for f in files[:8]:
-                lines.append(f"  [green]{f}[/green]")
-            if len(files) > 8:
-                lines.append(f"  [dim]… {len(files) - 8} more[/dim]")
+            file_list = "  ".join(f"[green]{f}[/green]" for f in files[:5])
+            more = f" [dim]+{len(files)-5}[/dim]" if len(files) > 5 else ""
+            lines.append(f"\n[bold]Files:[/bold] {file_list}{more}")
 
-        # Key commands run
+        # Commands (compact, 3 max)
         cmds = []
         try:
             cmds = _json.loads(s.commands_run) if s.commands_run else []
         except (ValueError, TypeError):
             pass
         if cmds:
-            lines.append(f"\n[bold]Commands:[/bold]")
-            for cmd in cmds[:5]:
-                lines.append(f"  [yellow]$ {cmd}[/yellow]")
+            lines.append(f"[bold]Cmds:[/bold]  " + "  ".join(f"[yellow]{c[:30]}[/yellow]" for c in cmds[:3]))
 
-        # Started with (truncated)
-        if s.first_prompt:
-            fp = clean_display_text(s.first_prompt) or ""
-            if fp:
-                lines.append(f"\n[bold]Started with:[/bold]")
-                lines.append(f"[dim]{fp[:250]}[/dim]")
-
-        # Left off at
-        if s.last_prompt and s.last_prompt != s.first_prompt:
-            lp = clean_display_text(s.last_prompt) or ""
-            if lp:
-                lines.append(f"\n[bold]Left off at:[/bold]")
-                lines.append(f"[dim]{lp[:200]}[/dim]")
-
-        # Related sessions (via shared files in knowledge graph)
+        # Related sessions
         try:
             from claude_recall.db import DB_PATH, get_connection, get_related_sessions
 
@@ -160,24 +154,31 @@ class PreviewPanel(Static):
             related = get_related_sessions(conn, s.session_id, limit=3)
             conn.close()
             if related:
-                lines.append(f"\n[bold]Related sessions:[/bold]")
+                lines.append(f"\n[bold]Related:[/bold]")
                 for rel in related:
-                    rel_summary = rel["summary"] or "Untitled"
-                    if len(rel_summary) > 60:
-                        rel_summary = rel_summary[:60] + "..."
-                    shared = rel["shared_files"]
-                    lines.append(
-                        f"  [cyan]{rel_summary}[/cyan] [dim]({shared} shared file{'s' if shared != 1 else ''})[/dim]"
-                    )
+                    name = (rel["summary"] or "Untitled")[:50]
+                    lines.append(f"  [cyan]{name}[/cyan] [dim]({rel['shared_files']} files)[/dim]")
         except Exception:
-            pass  # Non-critical — graph tables may not exist yet
+            pass
 
-        lines.append(f"\n[bold green]↵ Enter to resume[/bold green]  [dim]Ctrl+D for AI summary[/dim]")
-        lines.append(f"[dim]{s.session_id}[/dim]")
+        lines.append(f"\n[dim]{s.session_id}[/dim]")
 
-        content = "\n".join(lines)
-        self._content = content  # type: ignore[attr-defined]
-        self.update(content)
+        self._set_content("\n".join(lines))
+
+    def _set_content(self, text: str) -> None:
+        """Set preview content (replaces all children)."""
+        self._content = text  # type: ignore[attr-defined]
+        self.remove_children()
+        self.mount(Static(text, markup=True))
+        self.scroll_home(animate=False)
+
+    def _append_content(self, text: str) -> None:
+        """Append to preview and scroll to bottom."""
+        current = getattr(self, "_content", "")
+        self._content = current + text  # type: ignore[attr-defined]
+        self.remove_children()
+        self.mount(Static(self._content, markup=True))
+        self.scroll_end(animate=False)
 
 
 class SettingsScreen(ModalScreen):
@@ -389,8 +390,10 @@ class RecallApp(App):
         width: 45%;
         border-left: tall $primary;
         padding: 1 2;
-        overflow-y: auto;
         display: none;
+    }
+    #preview Static {
+        width: 100%;
     }
     #preview.visible {
         display: block;
@@ -656,21 +659,15 @@ class RecallApp(App):
 
     def _append_to_preview(self, text: str) -> None:
         """Append text to the current preview content."""
-        preview = self.query_one("#preview", PreviewPanel)
-        current = getattr(preview, "_content", "")
-        preview._content = current + text  # type: ignore[attr-defined]
-        preview.update(preview._content)
+        self.query_one("#preview", PreviewPanel)._append_content(text)
 
     def _replace_spinner(self, text: str) -> None:
         """Replace the loading spinner with final content and scroll to bottom."""
         preview = self.query_one("#preview", PreviewPanel)
         current = getattr(preview, "_content", "")
-        # Remove the spinner line
         current = current.replace("\n[bold]⏳ Loading AI summary...[/bold]", "")
-        preview._content = current + text  # type: ignore[attr-defined]
-        preview.update(preview._content)
-        # Scroll preview to bottom to show the summary
-        preview.scroll_end(animate=False)
+        preview._content = current  # type: ignore[attr-defined]
+        preview._append_content(text)
 
     def action_summarize(self) -> None:
         """Manually trigger AI summary of the selected session."""
