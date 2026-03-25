@@ -412,10 +412,12 @@ class RecallApp(App):
     }
     """
 
+    COMMAND_PALETTE_BINDING = "ctrl+shift+p"  # move palette out of the way
+
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
-        Binding("f2", "toggle_preview", "Preview", show=True),
-        Binding("f3", "open_settings", "Settings", show=True),
+        Binding("ctrl+p", "toggle_preview", "Preview", show=True),
+        Binding("ctrl+o", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
