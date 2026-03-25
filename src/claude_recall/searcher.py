@@ -35,12 +35,20 @@ def search(
     if not query or not query.strip():
         return []
 
+    from claude_recall.logger import Timer, get_logger
+
+    log = get_logger()
+    log.debug(f"search: query='{query}' limit={limit} project={project_filter} semantic={semantic}")
+
     conn = get_connection(db_path)
     try:
-        return _search_pipeline(
-            conn, query, limit, project_filter, after, before,
-            semantic, min_messages,
-        )
+        with Timer("search total", log):
+            results = _search_pipeline(
+                conn, query, limit, project_filter, after, before,
+                semantic, min_messages,
+            )
+        log.debug(f"search: {len(results)} results returned")
+        return results
     finally:
         conn.close()
 
@@ -49,6 +57,10 @@ def _search_pipeline(
     conn, query, limit, project_filter, after, before, semantic, min_messages,
 ) -> list[SearchResult]:
     """Core search pipeline. Connection managed by caller."""
+    from claude_recall.logger import Timer, get_logger
+
+    log = get_logger()
+
     # Check for structured query prefixes
     if query.startswith("file:"):
         return _file_search(conn, query[5:].strip(), limit, project_filter)
@@ -72,7 +84,8 @@ def _search_pipeline(
     # Fetch more candidates to survive depth-boost reranking (1-message
     # automated sessions often dominate BM25 and get penalized later)
     fts_fetch = max(limit * 5, 30)
-    fts_results = _fts_search(conn, query, fts_fetch, project_filter, after, before, min_messages)
+    with Timer("FTS5 search", log):
+        fts_results = _fts_search(conn, query, fts_fetch, project_filter, after, before, min_messages)
 
     # Phase 2: If strict AND found too few results, try broader searches.
     if len(fts_results) < 3:
@@ -132,7 +145,10 @@ def _search_pipeline(
         return fts_results[:limit]
 
     # Phase 3: Semantic search
-    vec_results = _vec_search(conn, query, limit * 3, project_filter, after, before, min_messages)
+    with Timer("semantic search", log):
+        vec_results = _vec_search(conn, query, limit * 3, project_filter, after, before, min_messages)
+
+    log.debug(f"FTS: {len(fts_results)} results, semantic: {use_semantic}")
 
     # Phase 4: Hybrid ranking — weight semantic MORE when FTS found few results
     fts_strength = min(len(fts_results) / 5, 1.0)
@@ -141,7 +157,8 @@ def _search_pipeline(
     combined = _reciprocal_rank_fusion(fts_results, vec_results, alpha=alpha, k=60)
 
     # Phase 5: Cross-encoder reranking
-    combined = _cross_encoder_rerank(query, combined[:limit * 2])
+    with Timer("cross-encoder rerank", log):
+        combined = _cross_encoder_rerank(query, combined[:limit * 2])
 
     # Phase 6: LLM reranking — only when explicitly set to "llm" mode
     from claude_recall.config import load_config

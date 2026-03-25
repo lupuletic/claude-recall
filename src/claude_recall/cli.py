@@ -49,10 +49,19 @@ def _run(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-tui", action="store_true", help="Plain text output (no TUI)")
     parser.add_argument("--json", action="store_true", dest="json_output", help="JSON output")
     parser.add_argument("--min-messages", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show debug logs")
     parser.add_argument("--force", action="store_true", help="Force full reindex (with 'index')")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
 
     args = parser.parse_args(argv)
+
+    # Setup logging
+    from claude_recall.logger import enable_verbose, get_logger
+
+    log = get_logger()
+    if getattr(args, "verbose", False):
+        enable_verbose(log)
+    log.debug(f"claude-recall started, args={vars(args)}")
 
     # Route to subcommands if the first positional arg is a known command
     command = args.query[0] if args.query else None

@@ -188,7 +188,6 @@ Prefixes query the knowledge graph directly — no fuzzy matching, just exact lo
 | `↓` / `↑` | Navigate between search bar and results |
 | `Enter` | Focus results / Resume selected session |
 | `Tab` | Toggle preview panel |
-| `Ctrl+D` | AI summary of selected session |
 | `Ctrl+S` | Open settings |
 | `Ctrl+W` | Delete last word |
 | `Esc` | Quit |
@@ -299,7 +298,6 @@ Embeddings alone miss exact matches. Searching a project name should match insta
 | Subagent bubbling | Yes | - | - | - |
 | Conversation chunking | 5-turn windows | Full text | - | - |
 | Interactive TUI | Textual | - | - | ratatui |
-| AI session summary | Ctrl+D | - | - | - |
 | Settings UI | Ctrl+S | - | - | - |
 | Auto-index hooks | SessionEnd | - | - | - |
 | cd to project dir | Yes | - | - | - |

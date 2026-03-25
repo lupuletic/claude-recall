@@ -414,7 +414,6 @@ class RecallApp(App):
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+p", "toggle_preview", "Preview", show=True),
-        Binding("ctrl+d", "summarize", "AI Summary", show=True),
         Binding("ctrl+s", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
@@ -432,7 +431,7 @@ class RecallApp(App):
             id="search-input",
         )
         yield Label(
-            "Search by text, or use file: cmd: branch: prefixes  |  Ctrl+D=AI Summary  Ctrl+S=Settings",
+            "Search by text, or use file: cmd: branch: prefixes  |  Ctrl+S=Settings",
             id="status",
         )
         with Horizontal(id="main"):
@@ -502,12 +501,6 @@ class RecallApp(App):
                 event.prevent_default()
                 return
 
-        # Ctrl+D: AI summary (works from anywhere when a result is selected)
-        if event.key == "ctrl+d":
-            if self._selected_result:
-                self.action_summarize()
-                event.prevent_default()
-                return
 
         if event.key == "down":
             focused = self.focused
@@ -545,7 +538,7 @@ class RecallApp(App):
             self._auto_summarize(event.item.result)
             # Update status with context-aware hints
             self.query_one("#status", Label).update(
-                "Enter=Resume  Ctrl+D=AI Summary  Ctrl+P=Toggle Preview  Esc=Quit"
+                "Enter=Resume  Ctrl+P=Toggle Preview  Esc=Quit"
             )
 
     @work(exclusive=True, thread=True)
@@ -587,7 +580,7 @@ class RecallApp(App):
 
         status.update(
             f'Found {len(results)} sessions for "{query}" — '
-            f"↓ to navigate, Enter to resume, Ctrl+D for AI summary"
+            f"↓ to navigate, Enter to resume"
         )
 
         # batch_update prevents intermediate repaints (no flicker)
@@ -713,97 +706,6 @@ class RecallApp(App):
         preview = self.query_one("#preview", PreviewPanel)
         preview.mount(Static(text, markup=True))
         preview.scroll_end(animate=False)
-
-    def action_summarize(self) -> None:
-        """Manually trigger AI summary of the selected session."""
-        if not self._selected_result:
-            return
-        preview = self.query_one("#preview", PreviewPanel)
-        if "visible" not in preview.classes:
-            preview.add_class("visible")
-        preview._set_content("[bold]Generating AI summary...[/bold]")
-        self._run_summarize(self._selected_result)
-
-    @work(exclusive=True, thread=True)
-    def _run_summarize(self, result: SearchResult) -> None:
-        """Run claude -p to summarize a session (manual Ctrl+D)."""
-        import json as _json
-        import shutil
-        import subprocess
-
-        s = result.session
-        claude_bin = shutil.which("claude")
-        if not claude_bin:
-            self.call_from_thread(
-                self.query_one("#preview", PreviewPanel)._set_content,
-                "[red]Claude CLI not found[/red]",
-            )
-            return
-
-        files = []
-        try:
-            files = _json.loads(s.files_modified) if s.files_modified else []
-        except Exception:
-            pass
-        cmds = []
-        try:
-            cmds = _json.loads(s.commands_run) if s.commands_run else []
-        except Exception:
-            pass
-
-        prompt = (
-            f"Based on the following session data, write a 3-5 bullet point summary of "
-            f"what was done in this Claude Code coding session. Be specific.\n\n"
-            f"Project: {result.display_project}\n"
-            f"Branch: {s.git_branch or 'unknown'}\n"
-            f"Messages: {s.message_count}\n"
-            f"First user message: {(s.first_prompt or '')[:400]}\n"
-            f"Last user message: {(s.last_prompt or '')[:400]}\n"
-            f"First assistant reply: {(s.first_reply or '')[:300]}\n"
-            f"Files modified: {', '.join(files[:10]) if files else 'none'}\n"
-            f"Commands run: {', '.join(cmds[:5]) if cmds else 'none'}\n"
-        )
-
-        try:
-            proc = subprocess.run(
-                [claude_bin, "-p", "--model", "haiku",
-                 "--no-session-persistence", "--tools", ""],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-            summary = proc.stdout.strip() if proc.returncode == 0 else "Summary failed"
-        except Exception as e:
-            summary = f"Error: {e}"
-
-        title = _session_title(s, 120)
-        output = (
-            f"[bold underline]{title}[/bold underline]\n\n"
-            f"[bold]Project:[/bold]  {result.display_project}\n"
-            f"[bold]Date:[/bold]     {format_date(s.modified)}\n"
-            f"[bold]Messages:[/bold] {s.message_count}\n\n"
-            f"[bold]AI Summary:[/bold]\n{summary}\n\n"
-            f"[bold green]↵ Enter to resume[/bold green]  "
-            f"[dim]ID: {s.session_id}[/dim]"
-        )
-        self.call_from_thread(
-            self.query_one("#preview", PreviewPanel).update,
-            output,
-        )
-
-    def action_open_settings(self) -> None:
-        """Open the settings modal."""
-        def on_settings_dismissed(saved: bool) -> None:
-            if saved:
-                status = self.query_one("#status", Label)
-                status.update("Settings saved")
-
-        self.push_screen(SettingsScreen(), on_settings_dismissed)
-
-    def action_quit(self) -> None:
-        self.exit(None)
-
 
 def run_tui(query: str, results: list[SearchResult]) -> None:
     """Launch the TUI and handle the result."""
