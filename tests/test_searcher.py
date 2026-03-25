@@ -773,3 +773,113 @@ class TestStructuredSearch:
         conn.close()
         assert len(results) >= 1
         assert results[0].session.session_id == "gs2"
+
+    def test_file_prefix_with_free_text(self, graph_db):
+        """file:auth.py debug should filter file results by text match."""
+        results = search("file:auth.py debug", db_path=graph_db, semantic=False)
+        # Should find gs1 (has auth.py AND "debug" in messages_text)
+        if results:
+            assert results[0].session.session_id == "gs1"
+
+    def test_cmd_prefix_with_free_text(self, graph_db):
+        """cmd:pytest debug should filter command results by text match."""
+        results = search("cmd:pytest debug", db_path=graph_db, semantic=False)
+        # gs1 has pytest command AND "debug" in messages_text
+        if results:
+            assert results[0].session.session_id == "gs1"
+
+    def test_branch_prefix_with_free_text(self, graph_db):
+        """branch:fix debug should filter branch results by text match."""
+        results = search("branch:fix/auth debug", db_path=graph_db, semantic=False)
+        if results:
+            assert results[0].session.session_id == "gs1"
+
+
+# ===========================================================================
+# Branch detection for -b/-c flags
+# ===========================================================================
+
+class TestBranchDetection:
+    def test_git_checkout_b_detects_branch(self):
+        """git checkout -b feature should detect 'feature', not '-b'."""
+        from claude_recall.utils import parse_session_file
+        import json
+        import tempfile
+        import os
+
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "git checkout -b feature/new-thing"}},
+                    ],
+                },
+            }),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            result = parse_session_file(path)
+            assert result["git_branch_detected"] == "feature/new-thing"
+        finally:
+            os.unlink(path)
+
+    def test_git_switch_c_detects_branch(self):
+        """git switch -c feature should detect 'feature', not '-c'."""
+        from claude_recall.utils import parse_session_file
+        import json
+        import tempfile
+        import os
+
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "git switch -c bugfix/login"}},
+                    ],
+                },
+            }),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            result = parse_session_file(path)
+            assert result["git_branch_detected"] == "bugfix/login"
+        finally:
+            os.unlink(path)
+
+    def test_git_checkout_plain_detects_branch(self):
+        """git checkout main should detect 'main'."""
+        from claude_recall.utils import parse_session_file
+        import json
+        import tempfile
+        import os
+
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "git checkout main"}},
+                    ],
+                },
+            }),
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            result = parse_session_file(path)
+            assert result["git_branch_detected"] == "main"
+        finally:
+            os.unlink(path)

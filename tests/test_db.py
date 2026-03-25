@@ -285,6 +285,38 @@ class TestDeleteSession:
         # Should not raise
         delete_session(db_conn, "nonexistent")
 
+    def test_delete_session_cleans_all_tables(self, db_conn, sample_session):
+        """delete_session should clean all related tables including session_chains."""
+        upsert_session(db_conn, sample_session)
+        upsert_chunks(db_conn, sample_session.session_id, ["chunk1"])
+        upsert_session_files(db_conn, sample_session.session_id, [
+            {"path": "src/foo.py", "name": "foo.py", "action": "edit"},
+        ])
+        upsert_session_commands(db_conn, sample_session.session_id, [
+            {"command": "pytest", "command_name": "pytest"},
+        ])
+        upsert_graph_edges(db_conn, sample_session.session_id, [
+            {"src_type": "session", "src_name": sample_session.session_id,
+             "dst_type": "file", "dst_name": "foo.py", "rel": "edited"},
+        ])
+        db_conn.execute(
+            "INSERT INTO session_chains (session_id, chain_id, chain_order) VALUES (?, ?, ?)",
+            (sample_session.session_id, sample_session.session_id, 0),
+        )
+        db_conn.commit()
+
+        delete_session(db_conn, sample_session.session_id)
+        db_conn.commit()
+
+        # Verify all tables are clean
+        for table in ["sessions", "chunks", "session_files", "session_commands",
+                       "graph_edges", "session_chains"]:
+            count = db_conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+                (sample_session.session_id,),
+            ).fetchone()[0]
+            assert count == 0, f"{table} still has rows after delete_session"
+
 
 # ===========================================================================
 # get_stats

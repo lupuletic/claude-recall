@@ -35,6 +35,8 @@ class TestLoadConfig:
         assert "show_subagents" in config
         assert "relevance_cutoff" in config
         assert "auto_index_hook" in config
+        assert "auto_ai_summary" in config
+        assert "update_check" in config
 
     def test_default_values(self):
         config = load_config()
@@ -43,6 +45,8 @@ class TestLoadConfig:
         assert config["show_subagents"] is False
         assert config["relevance_cutoff"] == 0.4
         assert config["auto_index_hook"] is True
+        assert config["auto_ai_summary"] is True
+        assert config["update_check"] is True
 
 
 # ===========================================================================

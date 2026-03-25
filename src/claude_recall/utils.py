@@ -224,13 +224,15 @@ def parse_session_file(file_path: str | Path) -> dict:
                                     # Extract first word (the actual command)
                                     first_word = cmd.split()[0] if cmd.split() else ""
                                     if first_word and first_word not in _SKIP_CMDS:
-                                        commands_run.append(cmd[:80])
+                                        commands_run.append(cmd[:200])
                                     # Detect git branch
                                     if not git_branch_detected:
-                                        for pattern in ["git checkout ", "git switch "]:
+                                        for pattern in ["git checkout -b ", "git checkout ", "git switch -c ", "git switch "]:
                                             if pattern in cmd:
                                                 branch = cmd.split(pattern)[-1].split()[0]
-                                                git_branch_detected = branch
+                                                if branch and not branch.startswith("-"):
+                                                    git_branch_detected = branch
+                                                    break
 
                 # Detect git branch from session metadata
                 if not git_branch_detected and obj.get("gitBranch"):
@@ -302,7 +304,7 @@ def _build_fts_text(user_messages: list[str], assistant_texts: list[str] | None 
         sampled = []
         sampled.extend(all_messages[:5])
         middle = all_messages[5:-5]
-        step = max(1, len(middle) // 15)
+        step = max(1, len(middle) // 30)
         sampled.extend(middle[::step])
         sampled.extend(all_messages[-5:])
         text = "\n".join(sampled)
@@ -330,9 +332,9 @@ def _build_chunks(
         parts = []
         if i < len(user_messages) and user_messages[i].strip():
             # Truncate individual messages to keep chunks balanced
-            parts.append(f"User: {user_messages[i][:300]}")
+            parts.append(f"User: {user_messages[i][:500]}")
         if i < len(assistant_texts) and assistant_texts[i].strip():
-            parts.append(f"Assistant: {assistant_texts[i][:300]}")
+            parts.append(f"Assistant: {assistant_texts[i][:500]}")
         if parts:
             turns.append("\n".join(parts))
 

@@ -347,6 +347,7 @@ def delete_session(conn: sqlite3.Connection, session_id: str) -> None:
     conn.execute("DELETE FROM session_files WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM session_commands WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM graph_edges WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM session_chains WHERE session_id = ?", (session_id,))
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
 

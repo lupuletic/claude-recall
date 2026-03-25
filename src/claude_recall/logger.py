@@ -20,22 +20,23 @@ def get_logger() -> logging.Logger:
         return _logger
 
     _logger = logging.getLogger("claude-recall")
-    _logger.setLevel(logging.DEBUG)
+    _logger.setLevel(logging.WARNING)  # quiet by default
+    # No handlers until enable_verbose() is called
+    return _logger
 
-    # Always log to file (for crash diagnosis)
+
+def enable_verbose(logger: logging.Logger) -> None:
+    """Enable verbose logging to both file and stderr."""
+    logger.setLevel(logging.DEBUG)
+    # Add file handler
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(LOG_FILE, mode="a")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     )
-    _logger.addHandler(file_handler)
-
-    return _logger
-
-
-def enable_verbose(logger: logging.Logger) -> None:
-    """Also log to stderr for --verbose mode."""
+    logger.addHandler(file_handler)
+    # Add stderr handler
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setLevel(logging.DEBUG)
     stderr_handler.setFormatter(

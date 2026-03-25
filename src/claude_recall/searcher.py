@@ -70,11 +70,35 @@ def _search_pipeline(
 
     # Check for structured query prefixes
     if query.startswith("file:"):
-        return _file_search(conn, query[5:].strip(), limit, project_filter)
+        parts = query[5:].strip().split(None, 1)
+        file_query = parts[0]
+        text_query = parts[1] if len(parts) > 1 else None
+        results = _file_search(conn, file_query, limit, project_filter)
+        if text_query:
+            fts_results = _fts_search(conn, text_query, limit * 3, project_filter, after, before, min_messages)
+            fts_ids = {r.session.session_id for r in fts_results}
+            results = [r for r in results if r.session.session_id in fts_ids]
+        return results
     if query.startswith("cmd:"):
-        return _command_search(conn, query[4:].strip(), limit, project_filter)
+        parts = query[4:].strip().split(None, 1)
+        cmd_query = parts[0]
+        text_query = parts[1] if len(parts) > 1 else None
+        results = _command_search(conn, cmd_query, limit, project_filter)
+        if text_query:
+            fts_results = _fts_search(conn, text_query, limit * 3, project_filter, after, before, min_messages)
+            fts_ids = {r.session.session_id for r in fts_results}
+            results = [r for r in results if r.session.session_id in fts_ids]
+        return results
     if query.startswith("branch:"):
-        return _branch_search(conn, query[7:].strip(), limit, project_filter)
+        parts = query[7:].strip().split(None, 1)
+        branch_query = parts[0]
+        text_query = parts[1] if len(parts) > 1 else None
+        results = _branch_search(conn, branch_query, limit, project_filter)
+        if text_query:
+            fts_results = _fts_search(conn, text_query, limit * 3, project_filter, after, before, min_messages)
+            fts_ids = {r.session.session_id for r in fts_results}
+            results = [r for r in results if r.session.session_id in fts_ids]
+        return results
 
     # Determine if we should do semantic search
     use_semantic = semantic if semantic is not None else has_vec_table(conn)
@@ -512,16 +536,18 @@ def _vec_search(
                 if fallback:
                     sid = fallback["session_id"]
                 else:
-                    continue  # no main session found
+                    # No main session exists — use the subagent itself
+                    # (better to show something than nothing)
+                    pass  # keep sid as the subagent session_id
 
         if sid not in session_best or similarity > session_best[sid][0]:
             session_best[sid] = (similarity, row["chunk_text"][:200])
 
-    # Fetch session data for matched sessions (main sessions only)
+    # Fetch session data for matched sessions
     results = []
     for sid, (similarity, chunk_snippet) in session_best.items():
         session_row = conn.execute(
-            "SELECT * FROM sessions WHERE session_id = ? AND is_subagent = 0", (sid,)
+            "SELECT * FROM sessions WHERE session_id = ?", (sid,)
         ).fetchone()
         if session_row is None:
             continue

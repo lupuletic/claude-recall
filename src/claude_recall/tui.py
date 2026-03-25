@@ -93,7 +93,7 @@ class SessionItem(ListItem):
 class PreviewPanel(VerticalScroll):
     """Scrollable preview panel showing session details."""
 
-    def update_preview(self, result: SearchResult | None) -> None:
+    def update_preview(self, result: SearchResult | None, db_path=None) -> None:
         if result is None:
             self._set_content("[dim]Select a session to preview[/dim]")
             return
@@ -150,7 +150,8 @@ class PreviewPanel(VerticalScroll):
         try:
             from claude_recall.db import DB_PATH, get_connection, get_related_sessions
 
-            conn = get_connection(DB_PATH)
+            use_db = db_path or DB_PATH
+            conn = get_connection(use_db)
             related = get_related_sessions(conn, s.session_id, limit=3)
             conn.close()
             if related:
@@ -418,12 +419,13 @@ class RecallApp(App):
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
-    def __init__(self, initial_query: str = "", initial_results: list[SearchResult] | None = None):
+    def __init__(self, initial_query: str = "", initial_results: list[SearchResult] | None = None, db_path=None):
         super().__init__()
         self.initial_query = initial_query
         self._results = initial_results or []
         self._preview_hidden = False  # user explicitly closed preview
         self._selected_result: SearchResult | None = None
+        self._db_path = db_path
 
     def compose(self) -> ComposeResult:
         yield Input(
@@ -534,7 +536,7 @@ class RecallApp(App):
             preview = self.query_one("#preview", PreviewPanel)
             if not self._preview_hidden and "visible" not in preview.classes:
                 preview.add_class("visible")
-            preview.update_preview(event.item.result)
+            preview.update_preview(event.item.result, db_path=self._db_path)
             # Auto-load AI summary in background
             self._auto_summarize(event.item.result)
             # Update status with context-aware hints
@@ -558,9 +560,11 @@ class RecallApp(App):
         if current != query.strip():
             return  # User kept typing — skip this search, next one will run
 
+        from claude_recall.config import load_config
         from claude_recall.searcher import search as do_search
 
-        results = do_search(query=query, limit=20)
+        limit = load_config().get("limit", 20)
+        results = do_search(query=query, limit=limit)
         self._results = results
         self.call_from_thread(self._display_results, results, query)
 

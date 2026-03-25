@@ -38,7 +38,7 @@ def _run(argv: list[str] | None = None) -> None:
 
     # Search options (work both with and without 'search' subcommand)
     parser.add_argument("query", nargs="*", help="Search query (or subcommand)")
-    parser.add_argument("-n", "--limit", type=int, default=10, help="Max results")
+    parser.add_argument("-n", "--limit", type=int, default=None, help="Max results")
     parser.add_argument("-p", "--project", help="Filter by project path substring")
     parser.add_argument("--after", help="Only sessions after this date (YYYY-MM-DD)")
     parser.add_argument("--before", help="Only sessions before this date (YYYY-MM-DD)")
@@ -185,8 +185,8 @@ def _cmd_search(args: argparse.Namespace) -> None:
     config = load_config()
     query = " ".join(args.query)
 
-    # Use config limit if user didn't explicitly set -n (default is 10)
-    if args.limit == 10:
+    # Use config limit if user didn't explicitly set -n
+    if args.limit is None:
         args.limit = config.get("limit", 10)
 
     # Determine search mode from config + CLI flags
@@ -388,15 +388,15 @@ def _cmd_gc(args: argparse.Namespace) -> None:
         print("No index found.")
         return
 
+    from claude_recall.db import delete_session
+
     conn = get_connection(args.db)
     rows = conn.execute("SELECT session_id, file_path FROM sessions").fetchall()
 
     removed = 0
     for row in rows:
         if not Path(row["file_path"]).exists():
-            conn.execute(
-                "DELETE FROM sessions WHERE session_id = ?", (row["session_id"],)
-            )
+            delete_session(conn, row["session_id"])
             removed += 1
 
     conn.commit()
