@@ -414,8 +414,8 @@ class RecallApp(App):
 
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True, priority=True),
-        Binding("f2", "toggle_preview", "F2=Preview", show=True),
-        Binding("ctrl+s", "open_settings", "Settings", show=True),
+        Binding("f2", "toggle_preview", "Preview", show=True),
+        Binding("f3", "open_settings", "Settings", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
@@ -434,7 +434,7 @@ class RecallApp(App):
             id="search-input",
         )
         yield Label(
-            "Search by text, or use file: cmd: branch: prefixes  |  Ctrl+S=Settings",
+            "Search by text, or use file: cmd: branch: prefixes",
             id="status",
         )
         with Horizontal(id="main"):
@@ -541,7 +541,7 @@ class RecallApp(App):
             self._auto_summarize(event.item.result)
             # Update status with context-aware hints
             self.query_one("#status", Label).update(
-                "Enter=Resume  F2=Toggle Preview  Esc=Quit"
+                "Enter to resume · ↑↓ navigate"
             )
 
     @work(exclusive=True, thread=True)
