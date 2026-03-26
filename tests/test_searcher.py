@@ -18,6 +18,7 @@ from claude_recall.db import (
 from claude_recall.models import SearchResult, Session
 from claude_recall.searcher import (
     _apply_depth_boost,
+    _apply_prompt_match_boost,
     _branch_search,
     _command_search,
     _cross_encoder_rerank,
@@ -517,6 +518,53 @@ class TestApplyDepthBoost:
         r_weak = self._make_result("weak", 50, 0.3)
         _apply_depth_boost([r_strong, r_weak])
         assert r_strong.score > r_weak.score
+
+
+# ===========================================================================
+# _apply_prompt_match_boost
+# ===========================================================================
+
+class TestApplyPromptMatchBoost:
+    def _make_result(
+        self,
+        session_id: str,
+        *,
+        score: float,
+        first_prompt: str,
+        summary: str | None = None,
+        last_prompt: str | None = None,
+    ) -> SearchResult:
+        s = Session(
+            session_id=session_id,
+            project_path="/test",
+            project_dir="test",
+            file_path=f"/tmp/{session_id}.jsonl",
+            summary=summary,
+            first_prompt=first_prompt,
+            last_prompt=last_prompt or first_prompt,
+            message_count=1,
+        )
+        return SearchResult(session=s, score=score)
+
+    def test_helper_session_does_not_get_exact_prompt_boost(self):
+        real = self._make_result(
+            "real",
+            score=1.0,
+            first_prompt="filling in a job application form",
+            summary="real user conversation",
+        )
+        helper = self._make_result(
+            "helper",
+            score=1.0,
+            first_prompt="[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]",
+            last_prompt="filling in a job application form",
+            summary="[SUGGESTION MODE: helper session]",
+        )
+
+        _apply_prompt_match_boost("filling in a job application form", [real, helper])
+
+        assert real.score > helper.score
+        assert helper.score == pytest.approx(1.0)
 
 
 # ===========================================================================

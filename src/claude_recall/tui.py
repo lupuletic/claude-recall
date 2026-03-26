@@ -566,7 +566,10 @@ class RecallApp(App):
         from claude_recall.searcher import search as do_search
 
         limit = load_config().get("limit", 20)
-        results = do_search(query=query, limit=limit)
+        search_kwargs = {"query": query, "limit": limit}
+        if self._db_path:
+            search_kwargs["db_path"] = self._db_path
+        results = do_search(**search_kwargs)
         self._results = results
         self.call_from_thread(self._display_results, results, query)
 
@@ -602,6 +605,13 @@ class RecallApp(App):
         preview = self.query_one("#preview", PreviewPanel)
         preview.toggle_class("visible")
         self._preview_hidden = "visible" not in preview.classes
+
+    def action_open_settings(self) -> None:
+        """Open the settings modal."""
+        def on_dismiss(changed: bool | None) -> None:
+            if changed:
+                self.query_one("#status", Label).update("Settings saved")
+        self.push_screen(SettingsScreen(), callback=on_dismiss)
 
     @work(thread=True, group="auto-summary")
     def _auto_summarize(self, result: SearchResult) -> None:
@@ -644,17 +654,27 @@ class RecallApp(App):
         except Exception:
             pass
 
+        # Build a rich conversation excerpt from messages_text
+        # This now contains the full conversation (up to 200K chars)
+        conversation_excerpt = ""
+        if s.messages_text:
+            # Take a generous sample: first 3K + last 3K chars
+            mt = s.messages_text
+            if len(mt) <= 8000:
+                conversation_excerpt = mt
+            else:
+                conversation_excerpt = mt[:3000] + "\n...\n" + mt[-3000:]
+
         prompt = (
             f"Based on the following session data, write a 2-3 bullet point summary of "
-            f"what was done in this Claude Code coding session. Be specific and concise.\n\n"
+            f"what was done in this Claude Code coding session. Be specific and concise. "
+            f"Focus on WHAT was built/fixed/changed and the outcome.\n\n"
             f"Project: {result.display_project}\n"
             f"Branch: {s.git_branch or 'unknown'}\n"
             f"Messages: {s.message_count}\n"
-            f"First user message: {(s.first_prompt or '')[:400]}\n"
-            f"Last user message: {(s.last_prompt or '')[:400]}\n"
-            f"First assistant reply: {(s.first_reply or '')[:300]}\n"
-            f"Files modified: {', '.join(files[:10]) if files else 'none'}\n"
-            f"Commands run: {', '.join(cmds[:5]) if cmds else 'none'}\n"
+            f"Files modified: {', '.join(files[:15]) if files else 'none'}\n"
+            f"Commands run: {', '.join(cmds[:10]) if cmds else 'none'}\n"
+            f"\n--- Conversation ---\n{conversation_excerpt}\n"
         )
 
         try:
@@ -720,11 +740,11 @@ class RecallApp(App):
         preview.mount(Static(text, markup=True))
         preview.scroll_end(animate=False)
 
-def run_tui(query: str, results: list[SearchResult]) -> None:
+def run_tui(query: str, results: list[SearchResult], db_path=None) -> None:
     """Launch the TUI and handle the result."""
     result_map = {r.session.session_id: r for r in results}
 
-    app = RecallApp(initial_query=query, initial_results=results)
+    app = RecallApp(initial_query=query, initial_results=results, db_path=db_path)
     session_id = app.run()
 
     if session_id:

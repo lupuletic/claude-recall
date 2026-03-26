@@ -13,7 +13,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 # Max chars to keep for indexed text fields
 MAX_FIRST_PROMPT = 500
 MAX_FIRST_REPLY = 500
-MAX_MESSAGES_TEXT = 50_000
+MAX_MESSAGES_TEXT = 50_000  # ~50KB per session — balances coverage with BM25 precision
 
 
 def decode_project_path(project_dir: str, projects_dir: Path = PROJECTS_DIR) -> str:
@@ -283,10 +283,11 @@ MAX_CHUNK_CHARS = 2000  # max chars per chunk text
 def _build_fts_text(user_messages: list[str], assistant_texts: list[str] | None = None) -> str:
     """Build FTS-indexed text by sampling messages throughout the conversation.
 
-    Interleaves user and assistant messages for richer keyword coverage.
-    For short conversations (< 20 msgs): include everything.
-    For longer ones: take first 5, every Nth from middle, and last 5.
-    This ensures keywords from any part of the conversation are searchable.
+    Interleaves user and assistant messages for keyword coverage.
+    For short conversations (≤ 20 msgs): include everything.
+    For longer ones: first 5 + sampled middle + last 5.
+    Sampling prevents long sessions from dominating BM25 rankings
+    for unrelated queries, while still covering keywords from any turn.
     """
     # Interleave user and assistant messages for better coverage
     all_messages: list[str] = []

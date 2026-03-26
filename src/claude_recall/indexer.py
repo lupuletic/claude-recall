@@ -31,6 +31,7 @@ from claude_recall.utils import (
 )
 
 
+
 def _mtime_to_iso(mtime: float) -> str:
     """Convert a file mtime to ISO 8601 string."""
     from datetime import datetime, timezone
@@ -164,7 +165,7 @@ def build_index(
         cmd_records = []
         for cmd in parsed.get("commands_run", []):
             cmd_name = cmd.split()[0] if cmd.split() else cmd
-            cmd_records.append({"command": cmd[:80], "command_name": cmd_name})
+            cmd_records.append({"command": cmd[:200], "command_name": cmd_name})
             graph_edges.append({
                 "src_type": "session", "src_name": session_id,
                 "dst_type": "command", "dst_name": cmd_name,
@@ -288,25 +289,25 @@ def _spawn_background_embeddings(db_path: Path, projects_dir: Path, verbose: boo
             file=sys.stderr,
         )
 
-    # Run `claude-recall index --quiet` in background
+    # Run `claude-recall index --quiet` in background, preserving custom paths
     import shutil
 
     claude_recall_bin = shutil.which("claude-recall")
-    if claude_recall_bin:
-        sp.Popen(
-            [claude_recall_bin, "index", "--quiet"],
-            stdout=sp.DEVNULL,
-            stderr=sp.DEVNULL,
-            start_new_session=True,
-        )
-    else:
-        # Fallback: run via python -m
-        sp.Popen(
-            [sys.executable, "-m", "claude_recall", "index", "--quiet"],
-            stdout=sp.DEVNULL,
-            stderr=sp.DEVNULL,
-            start_new_session=True,
-        )
+    base_cmd = [claude_recall_bin, "index", "--quiet"] if claude_recall_bin else \
+               [sys.executable, "-m", "claude_recall", "index", "--quiet"]
+
+    # Pass custom paths so the background process uses the same DB/source
+    if db_path != DB_PATH:
+        base_cmd.extend(["--db", str(db_path)])
+    if projects_dir != PROJECTS_DIR:
+        base_cmd.extend(["--claude-dir", str(projects_dir)])
+
+    sp.Popen(
+        base_cmd,
+        stdout=sp.DEVNULL,
+        stderr=sp.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def _enrich_parents_with_subagent_content(conn, verbose: bool = False) -> None:

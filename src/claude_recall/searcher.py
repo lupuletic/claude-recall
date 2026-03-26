@@ -17,6 +17,26 @@ def _should_show_subagents() -> bool:
     return load_config().get("show_subagents", False)
 
 
+def _subagent_filter_clause() -> str:
+    """Build the SQL WHERE clause for subagent filtering.
+
+    When show_subagents is off (default), we still include subagent sessions
+    from projects that have NO main sessions — otherwise those projects
+    would be completely invisible to search.
+    """
+    if _should_show_subagents():
+        return ""
+    # Include main sessions, OR subagents whose project has no main sessions.
+    # This ensures subagent-only projects (like grey-residence) are visible.
+    # The depth_boost already penalizes 1-message sessions (0.5x), so
+    # low-quality subagents rank lower naturally without being excluded.
+    return """AND (s.is_subagent = 0 OR NOT EXISTS (
+        SELECT 1 FROM sessions s2
+        WHERE s2.project_dir = s.project_dir AND s2.is_subagent = 0
+        AND s2.message_count >= 1
+    ))"""
+
+
 def search(
     query: str,
     db_path: Path = DB_PATH,
@@ -228,9 +248,11 @@ def _fts_search(
     where_parts = []
     params: list = []
 
-    # Exclude subagent sessions unless config says to show them
-    if not _should_show_subagents():
-        where_parts.append("s.is_subagent = 0")
+    # Smart subagent filtering
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        # Strip leading "AND " since we'll add it to where_parts
+        where_parts.append(sub_clause.lstrip("AND "))
 
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -318,7 +340,10 @@ def _fts_search_raw(
     min_messages: int,
 ) -> list[SearchResult]:
     """FTS search with a raw pre-built FTS5 query string."""
-    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
+    where_parts = []
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        where_parts.append(sub_clause.lstrip("AND "))
     params: list = []
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -385,7 +410,6 @@ def _fts_search_relaxed(
     min_messages: int,
 ) -> list[SearchResult]:
     """Relaxed FTS search using OR instead of AND."""
-    # Filter stop words but use OR
     terms = [
         t for t in query.lower().split()
         if t not in _STOP_WORDS and len(t) > 1
@@ -403,7 +427,10 @@ def _fts_search_relaxed(
     relaxed_query = " OR ".join(parts)
 
     # Build WHERE clauses
-    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
+    where_parts = []
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        where_parts.append(sub_clause.lstrip("AND "))
     params: list = []
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -692,6 +719,21 @@ def _apply_project_path_boost(query: str, results: list[SearchResult]) -> None:
             r.score *= 1.2
 
 
+def _is_helper_session(session: Session) -> bool:
+    """Return True for Claude-generated helper sessions, not user prompts.
+
+    These helper sessions often contain synthetic prompts such as
+    suggestion-mode or summarization instructions. They should still be
+    searchable, but we should not treat their prompts as "what the user typed"
+    for exact-prompt boosting.
+    """
+    text = " ".join(filter(None, [session.first_prompt, session.summary])).lower().strip()
+    return (
+        text.startswith("[suggestion mode:")
+        or text.startswith("your task is to create a detailed summary of the conversation so far")
+    )
+
+
 def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
     """Boost results where the query closely matches first/last prompt.
 
@@ -711,6 +753,11 @@ def _apply_prompt_match_boost(query: str, results: list[SearchResult]) -> None:
     ]
 
     for r in results:
+        if _is_helper_session(r.session):
+            # Helper-session prompts are generated instructions, not user-authored
+            # queries, so exact prompt matching is the wrong signal.
+            continue
+
         first_prompt = (r.session.first_prompt or "").lower()
         last_prompt = (r.session.last_prompt or "").lower()
         summary = (r.session.summary or "").lower()
@@ -958,7 +1005,10 @@ def _file_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by file name/path using the normalized session_files table."""
-    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
+    where_parts = []
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        where_parts.append(sub_clause.lstrip("AND "))
     params: list = [f"%{file_query}%", f"%{file_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -999,7 +1049,10 @@ def _command_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by command name using the normalized session_commands table."""
-    where_parts = [] if _should_show_subagents() else ["s.is_subagent = 0"]
+    where_parts = []
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        where_parts.append(sub_clause.lstrip("AND "))
     params: list = [f"%{cmd_query}%", f"%{cmd_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")
@@ -1039,10 +1092,10 @@ def _branch_search(
     project_filter: str | None,
 ) -> list[SearchResult]:
     """Search by git branch name."""
-    show_sub = _should_show_subagents()
     where_parts = ["(s.git_branch LIKE ? OR s.git_branch_detected LIKE ?)"]
-    if not show_sub:
-        where_parts.insert(0, "s.is_subagent = 0")
+    sub_clause = _subagent_filter_clause()
+    if sub_clause:
+        where_parts.insert(0, sub_clause.lstrip("AND "))
     params: list = [f"%{branch_query}%", f"%{branch_query}%"]
     if project_filter:
         where_parts.append("s.project_path LIKE ?")

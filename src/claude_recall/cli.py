@@ -206,7 +206,7 @@ def _cmd_search(args: argparse.Namespace) -> None:
         try:
             from claude_recall.tui import run_tui
 
-            run_tui("", [])
+            run_tui("", [], db_path=args.db)
             return
         except ImportError:
             pass
@@ -236,7 +236,7 @@ def _cmd_search(args: argparse.Namespace) -> None:
         try:
             from claude_recall.tui import run_tui
 
-            run_tui(query, results)
+            run_tui(query, results, db_path=args.db)
             return
         except ImportError:
             pass
