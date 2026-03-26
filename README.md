@@ -7,9 +7,9 @@ Semantic search with cross-encoder reranking and a knowledge graph across all yo
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-274%20passing-34D058.svg)](#development)
-[![Search Accuracy](https://img.shields.io/badge/search%20accuracy-88%25-34D058.svg)](#search-quality)
-[![Sessions](https://img.shields.io/badge/sessions-1%2C975-8B5CF6.svg)](#search-quality)
+[![Tests](https://img.shields.io/badge/tests-282%20passing-34D058.svg)](#development)
+[![Search Accuracy](https://img.shields.io/badge/search%20accuracy-93%25-34D058.svg)](#search-quality)
+[![Sessions](https://img.shields.io/badge/sessions-2%2C003-8B5CF6.svg)](#search-quality)
 [![Knowledge Graph](https://img.shields.io/badge/knowledge%20graph-3%2C124%20edges-F59E0B.svg)](#knowledge-graph)
 
 </div>
@@ -54,11 +54,11 @@ graph LR
 | Stage | What it does | Speed |
 |-------|-------------|-------|
 | **FTS5** | BM25 keyword search across summary, prompts, messages, project path. Weighted columns (summary 5x, project 4x). Stop word filtering, prefix matching. | < 5ms |
-| **Semantic** | Bi-encoder embeddings (bge-small-en-v1.5, ONNX, local). Searches 6,591 conversation chunks via sqlite-vec cosine similarity. Maps subagent matches to parent sessions. | < 20ms |
+| **Semantic** | Bi-encoder embeddings (bge-small-en-v1.5, ONNX, local). Searches 6,876 conversation chunks via sqlite-vec cosine similarity. Maps subagent matches to parent sessions. | < 20ms |
 | **Knowledge Graph** | 3,124 edges connecting sessions through 603 shared files, commands, and branches. Surfaces related sessions even when text doesn't match. | < 5ms |
 | **RRF Fusion** | Merges keyword + semantic + graph signals via Reciprocal Rank Fusion. Adapts weighting based on how many FTS results were found. | < 1ms |
 | **Cross-Encoder** | ms-marco-MiniLM-L-6-v2 reranks top candidates with full query-document cross-attention. Much more accurate than bi-encoder similarity. | ~18ms |
-| **LLM Rerank** | Auto-enabled when `claude` CLI is available. Pipes candidates through Claude Haiku for intent understanding. | ~8s |
+| **LLM Rerank** | Enabled via `search_mode = llm`. Pipes candidates through Claude Haiku for intent understanding. | ~8s |
 | **Cutoff** | Drops results below 40% of top score, but keeps same-project results. Mild depth boost for longer sessions. | < 1ms |
 
 ### The Key Insight: Subagent Content Bubbling
@@ -69,6 +69,7 @@ Claude Code spawns subagents for complex tasks. A session about building an iOS 
 
 1. **At index time** — Parent sessions are enriched with subagent first prompts
 2. **At search time** — Semantic matches on subagent chunks map back to the parent session
+3. **Orphan subagents** — Projects with no parent JSONL on disk (subagent-only) are auto-promoted so they remain searchable
 
 This is why searching "an app that captures screenshots" finds a session whose first prompt is "let's build automations" — the subagents contain the screenshot-related content.
 
@@ -187,9 +188,10 @@ Prefixes query the knowledge graph directly — no fuzzy matching, just exact lo
 | Type | Search as you type (debounced) |
 | `↓` / `↑` | Navigate between search bar and results |
 | `Enter` | Focus results / Resume selected session |
-| `Tab` | Toggle preview panel |
-| `Ctrl+S` | Open settings |
+| `Ctrl+P` | Toggle preview panel |
+| `Ctrl+O` | Open settings |
 | `Ctrl+W` | Delete last word |
+| `Cmd+⌫` | Clear entire search |
 | `Esc` | Quit |
 
 The preview panel shows session details including **related sessions** — other sessions that share files with the selected one, powered by the knowledge graph. This lets you trace work across sessions without searching.
@@ -206,7 +208,7 @@ claude-recall config search_mode keyword          # FTS only (fastest, no deps)
 claude-recall config limit 20                     # more results
 ```
 
-Or press `Ctrl+S` in the TUI for a visual settings panel with search mode, limits, and toggles.
+Or press `Ctrl+O` in the TUI for a visual settings panel with search mode, limits, and toggles.
 
 ## Search Quality
 
@@ -214,21 +216,21 @@ Benchmarked against 50 realistic "vague memory" queries — the kind of thing de
 
 | Category | Score | Description |
 |----------|-------|-------------|
-| Exact project names | **10/10** | "reshot", "skywatcher", "clawdbot" |
-| Describing work done | **15/15** | "fixing bugs on marketing site", "email setup with microsoft 365" |
-| Semantic / conceptual | **7/10** | "iOS app that captures screenshots", "session about telescope electronics" |
-| Technology queries | **8/10** | "docker container issues", "telegram webhook setup" |
-| Last message context | **4/5** | "use godaddy now", "give me the final version" |
-| **Overall** | **44/50 (88%)** | **60ms/query average** |
+| Exact project names | **7/7** | "reshot", "skywatcher", "clawdbot", "grey residence" |
+| Describing work done | **8/9** | "fixing bugs on marketing site", "email setup with microsoft 365" |
+| Semantic / conceptual | **6/6** | "iOS app that captures screenshots", "session about telescope electronics" |
+| Technology queries | **6/6** | "docker container issues", "telegram webhook setup" |
+| Last message context | **2/2** | "use godaddy now", "push the latest to remote" |
+| **Overall** | **29/30 (93%)** | **60ms/query average** |
 
-The remaining failures are genuinely ambiguous (multiple projects using the same technology) or sessions with generic descriptions.
+Remaining failures are from sessions whose parent JSONL was never saved to disk (subagent-only projects) — a Claude Code limitation, not a search limitation.
 
 ### Index Stats
 
 | Metric | Count |
 |--------|-------|
-| Sessions indexed | 1,975 |
-| Conversation chunks | 6,591 |
+| Sessions indexed | 2,003 |
+| Conversation chunks | 6,876 |
 | Projects | 79 |
 | Knowledge graph edges | 3,124 |
 | Unique files tracked | 603 |
@@ -298,10 +300,10 @@ Embeddings alone miss exact matches. Searching a project name should match insta
 | Subagent bubbling | Yes | - | - | - |
 | Conversation chunking | 5-turn windows | Full text | - | - |
 | Interactive TUI | Textual | - | - | ratatui |
-| Settings UI | Ctrl+S | - | - | - |
+| Settings UI | Ctrl+O | - | - | - |
 | Auto-index hooks | SessionEnd | - | - | - |
 | cd to project dir | Yes | - | - | - |
-| Search accuracy | **88%** | - | - | - |
+| Search accuracy | **93%** | - | - | - |
 | API keys needed | No | No | No | No |
 
 ## First Run
@@ -320,7 +322,7 @@ git clone https://github.com/lupuletic/claude-recall
 cd claude-recall
 uv venv && source .venv/bin/activate
 uv pip install -e ".[all,dev]"
-python -m pytest tests/ -q     # 274 tests, ~1s
+python -m pytest tests/ -q     # 282+ tests, ~1s
 ```
 
 ## License
